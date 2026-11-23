@@ -1,3 +1,5 @@
+import re
+
 from .models import PolicyInput
 
 
@@ -12,9 +14,10 @@ INSURER_ALIASES = {
 def identify_insurer(name: str | None) -> tuple[str | None, str | None]:
     if not name:
         return None, "Insurer is missing."
-    normalized = " ".join(name.casefold().replace("-", " ").split())
+    # Compare without spaces/punctuation: OCR often drops spaces ("TATAAIGGENERAL...").
+    compact = re.sub(r"[^a-z0-9]", "", name.casefold())
     matches = [key for key, aliases in INSURER_ALIASES.items()
-               if any(" ".join(alias.replace("-", " ").split()) in normalized for alias in aliases)]
+               if any(re.sub(r"[^a-z0-9]", "", alias) in compact for alias in aliases)]
     if len(matches) == 1:
         return matches[0], None
     if not matches:

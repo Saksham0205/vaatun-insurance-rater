@@ -6,12 +6,13 @@ import logging
 import tempfile
 import time
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 from uuid import UUID
 
 from fastapi import Depends, FastAPI, File, HTTPException, Query, Request, Response, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 from starlette.concurrency import run_in_threadpool
 
 from .api_schemas import (
@@ -20,7 +21,8 @@ from .api_schemas import (
 from .auth import AuthenticatedUser, get_current_user
 from .config import settings
 from .rating_engine.document_pipeline import document_to_decision, result_dict
-from .repository import MAX_PDF_BYTES, PIPELINE_VERSION, PersistenceError, SupabaseRepository
+from .rating_engine import review as rating_review
+from .repository import MAX_PDF_BYTES, PersistenceError, SupabaseRepository
 
 class JsonLogFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
@@ -38,18 +40,6 @@ _handler = logging.StreamHandler()
 _handler.setFormatter(JsonLogFormatter())
 logging.basicConfig(level=logging.INFO, handlers=[_handler], force=True)
 logger = logging.getLogger("vaatun.api")
-
-if settings.debugpy_enable:
-    try:
-        import debugpy
-        port = settings.debugpy_port
-        try:
-            debugpy.listen(("0.0.0.0", port))
-            logger.info("debugger_listening", extra={"port": port, "detail": f"debugpy listening on port {port}. Attach debugger from VS Code."})
-        except RuntimeError:
-            pass  # Already listening (e.g., uvicorn reload)
-    except ImportError:
-        logger.warning("debugpy_not_installed", extra={"detail": "debugpy is not installed. Run pip install debugpy to enable debugger attachment."})
 
 app = FastAPI(title="Vaatun Insurance Rater API", version="1.0.0")
 app.add_middleware(
@@ -167,11 +157,12 @@ async def analyze_document(
     document_id: UUID,
     user: Annotated[AuthenticatedUser, Depends(get_current_user)],
     repository: Annotated[SupabaseRepository, Depends(get_repository)],
+    force: Annotated[bool, Query(description="Re-run extraction for a completed analysis")] = False,
 ):
     document = repository.get_document(user.id, str(document_id))
     if not document:
         raise HTTPException(status_code=404, detail="Document not found.")
-    analysis, claimed = repository.claim_analysis(user.id, document)
+    analysis, claimed = repository.claim_analysis(user.id, document, force=force)
     if not claimed:
         return AnalysisStartResponse(
             analysis_id=analysis["id"], document_id=str(document_id), status=analysis["status"],
@@ -200,12 +191,54 @@ async def analyze_document(
     except Exception as exc:
         logger.exception("analysis_failed", extra={"user_id": user.id, "document_id": document["id"], "analysis_id": analysis["id"]})
         try:
-            await run_in_threadpool(repository.fail_analysis, user.id, document["id"], analysis["id"], "Analysis processing failed; retry is available.")
+            await run_in_threadpool(repository.fail_analysis, user.id, document["id"], analysis["id"],
+                                    "Analysis processing failed; retry is available.")
         except Exception:
             logger.exception("analysis_failure_state_persist_failed", extra={"analysis_id": analysis["id"]})
         if isinstance(exc, HTTPException):
             raise
         raise HTTPException(status_code=500, detail="Policy analysis failed. You can retry this analysis.") from exc
+
+
+class ReviewRequest(BaseModel):
+    # field -> value; an empty value removes that override. Replaces earlier overrides.
+    overrides: dict[str, Any] = Field(default_factory=dict)
+
+
+@app.get("/api/v1/review/options")
+def review_options(user: Annotated[AuthenticatedUser, Depends(get_current_user)]):
+    """Reviewable rating inputs and the rate-card values each one accepts."""
+    return rating_review.options()
+
+
+@app.post("/api/v1/analyses/{analysis_id}/review")
+async def review_analysis(
+    analysis_id: UUID,
+    body: ReviewRequest,
+    user: Annotated[AuthenticatedUser, Depends(get_current_user)],
+    repository: Annotated[SupabaseRepository, Depends(get_repository)],
+):
+    """Apply reviewer-supplied rating inputs and recompute commission (no re-extraction)."""
+    row = repository.get_analysis(user.id, str(analysis_id))
+    if not row:
+        raise HTTPException(status_code=404, detail="Analysis not found.")
+    if row.get("status") != "completed" or not row.get("result_json"):
+        raise HTTPException(status_code=409, detail="Only a completed analysis can be reviewed.")
+    document = repository.get_document(user.id, str(row["document_id"]))
+    if not document:
+        raise HTTPException(status_code=404, detail="Document not found.")
+    try:
+        result = await run_in_threadpool(
+            rating_review.rerate, row["result_json"], body.overrides,
+            Path(__file__).resolve().parents[1] / "rate_cards")
+    except LookupError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    await run_in_threadpool(repository.save_analysis_result, user.id, document, row, result)
+    logger.info("analysis_reviewed", extra={"user_id": user.id, "analysis_id": str(analysis_id),
+                                            "overridden_fields": sorted(result["overrides"])})
+    return _analysis_response(repository.get_analysis(user.id, str(analysis_id)) or row)
 
 
 @app.get("/api/v1/analyses/{analysis_id}")

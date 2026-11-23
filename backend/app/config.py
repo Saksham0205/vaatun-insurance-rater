@@ -4,11 +4,6 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 _env_file = Path(__file__).resolve().parent.parent / ".env"
 
 class Settings(BaseSettings):
-    gemini_api_key: str = ""
-    gemini_model: str = "gemini-3.5-flash-lite"
-    gemini_extraction_enabled: bool = True
-    debugpy_enable: bool = True
-    debugpy_port: int = 5678
     supabase_url: str = ""
     supabase_service_role_key: str = ""
     supabase_publishable_key: str = ""

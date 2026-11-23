@@ -28,28 +28,28 @@ Territory mapping:
   - Territory column names are sourced directly from row 5 of Pvtcar sheet.
   - RTO/city → territory requires Tata AIG's internal RTO mapping.
   - The workbook does not contain a Pvtcar-specific RTO cluster mapping sheet.
-  - Status: Territory lookup returns AMBIGUOUS unless the policy geography
-    exactly matches a territory column name.
+  - The territory is the policy's state/city when it names a territory column
+    exactly (e.g. DELHI); otherwise the reviewer selects it.
 
 HE/UHE vs Other than HE/UHE:
   - The workbook uses these two type categories.
   - 'Compact', 'MPV SUV', 'Mid Size', 'Ultra High End', 'Mini', 'High End' appear
     in the Type column of the lookup table.
-  - Without a vehicle make/model → segment lookup table in the workbook, the
-    vehicle type must be supplied explicitly.
+  - The workbook has no make/model -> segment table, so the reviewer selects the
+    segment.
+
+Fuel: rows for CNG and Electric are preferred over "Other Than Diesel" when present.
 """
 from __future__ import annotations
 
 import hashlib
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
 
 import openpyxl
 
-from ..exceptions import exception_decision
 from ..models import (Component, ComponentDecision, DecisionStatus,
-                      NormalizedRateRule, PolicyInput, SourceRef, SourceValue)
+                      PolicyInput, SourceRef)
 
 TATA_FILENAME = "Tata AIG Standard Grid_Communication_Mar'26_F_v2_0212.xlsx"
 TATA_CARD_VERSION = "March 2026 file; standard grid effective 1 Nov 2025"
@@ -260,6 +260,7 @@ class TataAIGAdapter:
             ncb=ncb,
             territory=territory,
             file_sha=file_sha,
+            add_on=self._add_on_flag(policy),
         )
 
         all_issues = type_issues + business_issues + ncb_issues + lookup_issues
@@ -357,6 +358,7 @@ class TataAIGAdapter:
         ncb: str,
         territory: str,
         file_sha: str,
+        add_on: str | None = None,
     ) -> tuple[float | None, int | None, list[str]]:
         """Look up the base commission rate in the Pvtcar sheet.
 
@@ -397,7 +399,7 @@ class TataAIGAdapter:
                     if rate_val is not None:
                         try:
                             rate_float = float(rate_val)
-                            candidates.append((row_idx, rate_float))
+                            candidates.append((row_idx, rate_float, r_fuel.lower(), str(row[11] or "").strip().lower()))
                         except (TypeError, ValueError):
                             pass
         finally:
@@ -410,18 +412,22 @@ class TataAIGAdapter:
                 f"fuel={fuel_type!r}, section={section_text!r}, ncb={ncb!r}, territory={territory!r}."
             ]
 
-        if len(candidates) > 1:
-            # Deduplicate by value
-            unique_rates = {rate for _, rate in candidates}
-            if len(unique_rates) == 1:
-                row_idx, rate = candidates[0]
-                return rate, row_idx, []
+        # A row for the exact fuel (e.g. CNG) is more specific than "Other Than Diesel".
+        exact = [c for c in candidates if c[2] == fuel_type.lower()]
+        if exact:
+            candidates = exact
+        # The Add On column distinguishes policies with and without add-on covers.
+        if len({rate for _, rate, _, _ in candidates}) > 1 and add_on is not None:
+            by_addon = [c for c in candidates if c[3] in {add_on.lower(), "all"}]
+            if by_addon:
+                candidates = by_addon
+        unique_rates = {rate for _, rate, _, _ in candidates}
+        if len(unique_rates) > 1:
             return None, None, [
                 f"Tata AIG Pvtcar: {len(candidates)} rows match the lookup conditions with different rates "
-                f"({unique_rates}). Cannot resolve unambiguously."
+                f"({sorted(unique_rates)}). Cannot resolve unambiguously."
             ]
-
-        row_idx, rate = candidates[0]
+        row_idx, rate, _, _ = candidates[0]
         return rate, row_idx, []
 
     # ------------------------------------------------------------------ #
@@ -449,15 +455,20 @@ class TataAIGAdapter:
         pf = policy_fuel.lower()
         if rf == "all":
             return True
-        if pf in {"diesel"}:
-            return "diesel" in rf
-        if pf in {"petrol", "electric", "ev", "cng", "lpg", "bifuel", "hybrid"}:
-            return "other than diesel" in rf or pf in rf
-        return rf == pf
+        if pf == "diesel":
+            return "diesel" in rf and "other" not in rf
+        # A specific CNG/Electric row is preferred by the caller; otherwise any
+        # non-diesel fuel falls under "Other Than Diesel".
+        return rf == pf or rf == "other than diesel"
 
     def _resolve_territory(self, policy: PolicyInput,
                            file_sha: str) -> tuple[str | None, list[str]]:
         """Map RTO or geography to Tata AIG territory column name."""
+        if policy.territory:
+            name = policy.territory.strip().upper()
+            if name in _TERRITORY_COLS:
+                return name, []
+            return None, [f"Tata AIG: territory '{policy.territory}' is not a Pvtcar territory column."]
         rto = (policy.rto or "").lower().strip()
         geo = (policy.geography or "").lower().strip()
 
@@ -487,6 +498,10 @@ class TataAIGAdapter:
             return "", ["Fuel type is required for Tata AIG lookup; it will not be defaulted."]
         if fuel == "diesel":
             return "Diesel", []
+        if fuel in {"cng", "lpg", "bifuel"}:
+            return "CNG", []
+        if fuel in {"electric", "ev"}:
+            return "Electric", []
         return "Other Than Diesel", []
 
     def _product_to_section(self, product: str) -> str:
@@ -514,6 +529,17 @@ class TataAIGAdapter:
         if policy.ncb_percent is not None:
             return ("Yes" if policy.ncb_percent > 0 else "No"), []
         return None, ["NCB state is required for Tata AIG Package/SAOD lookup; it will not be defaulted."]
+
+    _TP_ONLY_COVERS = ("pa cover", "personal accident", "legal liability", "third party", "third-party",
+                       "tp for", "imt 25", "cng / lpg kit tp", "bi-fuel kit")
+
+    def _add_on_flag(self, policy: PolicyInput) -> str | None:
+        """'Yes' when an own-damage add-on cover was bought, 'No' when none; None if unknown."""
+        if policy.add_ons is None:
+            return None
+        od_add_ons = [a for a in policy.add_ons
+                      if not any(term in a.casefold() for term in self._TP_ONLY_COVERS)]
+        return "Yes" if od_add_ons else "No"
 
     def _resolve_vehicle_type(self, policy: PolicyInput) -> tuple[str | None, str | None, list[str]]:
         """Resolve vehicle type (HE/UHE vs Other than HE/UHE) and segment from policy."""

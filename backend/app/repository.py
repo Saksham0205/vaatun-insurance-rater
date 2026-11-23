@@ -1,18 +1,15 @@
 from __future__ import annotations
 
-import hashlib
-import re
 import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from postgrest.exceptions import APIError
 from supabase import Client, create_client
 
 from .config import settings
 
-PIPELINE_VERSION = "deterministic-document-pipeline-v1"
+PIPELINE_VERSION = "local-rules-pipeline-v3"
 MAX_PDF_BYTES = 25 * 1024 * 1024
 FACT_FIELDS = (
     "insurer", "previous_insurer", "policy_type", "fuel", "engine_cc", "manufacture_year",
@@ -167,7 +164,8 @@ class SupabaseRepository:
         rows = self.client.table("analyses").select("*").eq("user_id", user_id).eq("document_id", document_id).order("created_at", desc=True).limit(1).execute().data
         return rows[0] if rows else None
 
-    def claim_analysis(self, user_id: str, document: dict[str, Any]) -> tuple[dict[str, Any], bool]:
+    def claim_analysis(self, user_id: str, document: dict[str, Any], *, force: bool = False) -> tuple[dict[str, Any], bool]:
+        """Claim the document's analysis for processing. ``force`` re-runs a completed one."""
         existing_rows = self.client.table("analyses").select("*").eq("user_id", user_id).eq("document_id", document["id"]) \
             .eq("document_sha256", document["sha256"]).eq("pipeline_version", PIPELINE_VERSION).limit(1).execute().data
         if not existing_rows:
@@ -186,10 +184,11 @@ class SupabaseRepository:
                 if not existing_rows:
                     raise PersistenceError("Could not create analysis record.")
         row = existing_rows[0]
-        if row["status"] == "completed":
+        if row["status"] == "completed" and not force:
             return row, False
         stale_before = (datetime.now(timezone.utc) - timedelta(seconds=settings.analysis_stale_after_seconds)).isoformat()
-        can_retry = row["status"] in {"failed", "pending"} or (row["status"] == "processing" and row.get("updated_at", "") < stale_before)
+        can_retry = (row["status"] in {"failed", "pending"} or (force and row["status"] == "completed")
+                     or (row["status"] == "processing" and row.get("updated_at", "") < stale_before))
         if not can_retry:
             return row, False
         req = self.client.table("analyses").update({"status": "processing", "started_at": _now(), "updated_at": _now(), "completed_at": None, "error_message": None}) \
@@ -229,7 +228,8 @@ class SupabaseRepository:
         for component in ("OD", "TP"):
             for ref in result["decisions"][component].get("evidence", []):
                 evidence.append(_evidence_row(
-                    analysis_id, ref, "policy" if ref.get("source_file") == document["original_name"] else "rate_card",
+                    analysis_id, ref, "policy" if ref.get("source_file") == document["original_name"]
+                    else "other" if ref.get("source_file") == "Operator review" else "rate_card",
                     component_decision_id=decision_ids[component]))
         if evidence:
             self.client.table("evidence_references").insert(evidence).execute()
@@ -261,7 +261,6 @@ def _fact_rows(analysis_id: str, result: dict[str, Any]) -> tuple[list[dict[str,
     facts = result.get("facts", {})
     conflicts = result.get("conflicts", {})
     low = result.get("low_confidence", {})
-    missing = result.get("missing_or_uncertain", [])
     rows: list[dict[str, Any]] = []
     for field in FACT_FIELDS:
         fact = facts.get(field)

@@ -32,16 +32,13 @@ RTO mapping uses 'RTO List' sheet (Region_Code, Column1=RTO code, Region_City, Z
 from __future__ import annotations
 
 import hashlib
-import re
 from decimal import Decimal
 from pathlib import Path
-from typing import Any
 
 import openpyxl
 
-from ..exceptions import exception_decision
 from ..models import (Component, ComponentDecision, DecisionStatus,
-                      NormalizedRateRule, PolicyInput, SourceRef, SourceValue)
+                      PolicyInput, SourceRef)
 
 RELIANCE_FILENAME = "Reliance Broking Premier  FEB 26 Grid.xlsx"
 RELIANCE_CARD_VERSION = "February 2026 (Pvt Car Old Business Grid Jan-26)"
@@ -179,7 +176,6 @@ class RelianceAdapter:
             return od, tp
 
         file_sha = _sha256(self._path)
-        source_ref = SourceRef(RELIANCE_FILENAME, file_sha, sheet=_SHEET_PC, role="rate_card_source")
 
         # Resolve zone/region from RTO or geography
         zone, region, geo_issues = self._resolve_geography(policy, file_sha)
@@ -241,53 +237,45 @@ class RelianceAdapter:
         has_zd = self._has_zero_dep(policy)
         has_tyre_rti = self._has_tyre_rti(policy)
 
-        # The workbook says "5% lesser" and contains further reductions/additions,
-        # but does not establish whether these are percentage points or relative
-        # changes, nor their stacking order.  Do not publish a guessed payout.
+        # Grid adjustments (sheet note, cell H3). The workbook does not say whether
+        # "5% lesser" is relative or in percentage points; broker grids quote payout
+        # changes in percentage points, so they are applied that way and disclosed
+        # as assumptions on the decision. Adjustments apply to the OD payout only
+        # (the private-car STP payout is 0%), and a rate never drops below zero.
         addon_text = " ".join(policy.add_ons or ()).casefold()
-        unresolved_adjustments: list[str] = []
-        if engine_cc is not None and engine_cc < 1000:
-            unresolved_adjustments.append("Reliance <1000 CC adjustment is worded '5% lesser'; relative-versus-percentage-point interpretation is not verified.")
-        if has_zd or "zero dep" in addon_text or "zero depreciation" in addon_text:
-            unresolved_adjustments.append("Reliance standalone ZD adjustment stacking is not verified.")
-        if has_tyre_rti or "tyre" in addon_text or "rti" in addon_text or "return to invoice" in addon_text:
-            unresolved_adjustments.append("Reliance Tyre/RTI adjustment stacking is not verified.")
-        if "extended warranty" in addon_text or " ew" in f" {addon_text}":
-            unresolved_adjustments.append("Reliance Extended Warranty flat-payout interaction with the grid is not verified.")
-        if unresolved_adjustments:
-            for decision in (od, tp):
-                if decision.applicable:
-                    decision.issues.extend(unresolved_adjustments)
-            return od, tp
-
+        add_on_count = len(policy.add_ons or ())
+        standalone_zd = has_zd and add_on_count == 1
         adj_notes: list[str] = []
+        assumptions: list[str] = []
         adj_ref = SourceRef(RELIANCE_FILENAME, file_sha, sheet=_SHEET_PC,
                             cell="H3", role="adjustment_instruction")
+        if "extended warranty" in addon_text or " ew" in f" {addon_text}":
+            assumptions.append("Assumption: the Extended Warranty flat payout is paid separately and is not "
+                               "included in this grid commission.")
 
-        def apply_adjustments(base_pct: Decimal | None, component_name: str) -> Decimal | None:
+        def apply_adjustments(base_pct: Decimal | None) -> Decimal | None:
             if base_pct is None:
                 return None
             rate = base_pct
             notes_local = []
-            # <1000 CC: 5 pp less
             if engine_cc is not None and engine_cc < 1000:
-                rate = rate - Decimal("5")
-                notes_local.append("<1000CC: −5 pp (source: 'Payout for <1000 CC, PO will be 5% lesser than the above Grid')")
-            # Standalone ZD: 2.5 pp less (applies to Package/SAOD, not STP)
-            if has_zd and product != "SATP":
-                rate = rate - Decimal("2.5")
-                notes_local.append("Standalone ZD: −2.5 pp (source: 'Standalone ZD policies 2.5% will be reduced')")
-            # Tyre/RTI bundle: +2.5 pp
-            if has_tyre_rti and product != "SATP":
-                rate = rate + Decimal("2.5")
-                notes_local.append("Tyre/RTI bundle: +2.5 pp (source: 'Addon Bundle (Tyre/RTI) if Sourced, 2.5% Additional Payout')")
+                rate -= Decimal("5")
+                notes_local.append("<1000 CC: -5 percentage points ('Payout for <1000 CC, PO will be 5% lesser than the above Grid')")
+            if standalone_zd:
+                rate -= Decimal("2.5")
+                notes_local.append("Standalone ZD: -2.5 percentage points ('Standalone ZD policies 2.5% will be reduced')")
+            if has_tyre_rti:
+                rate += Decimal("2.5")
+                notes_local.append("Tyre/RTI bundle: +2.5 percentage points ('Addon Bundle (Tyre/RTI) if Sourced, 2.5% Additional Payout')")
             if notes_local:
-                adj_notes.extend(notes_local)
-                evidence_refs.append(adj_ref)
-            return rate
+                adj_notes.extend(n for n in notes_local if n not in adj_notes)
+                assumptions.append("Assumption: grid adjustments are applied in percentage points.")
+                if adj_ref not in evidence_refs:
+                    evidence_refs.append(adj_ref)
+            return max(rate, Decimal("0"))
 
         if od_applicable and od_base is not None:
-            od_rate = apply_adjustments(od_base, "OD")
+            od_rate = apply_adjustments(od_base)
             od_ref = SourceRef(RELIANCE_FILENAME, file_sha, sheet=_SHEET_PC,
                                cell=f"C{row_num}" if row_num else None, role="rate_cell")
             od.evidence = evidence_refs + [od_ref]
@@ -306,7 +294,7 @@ class RelianceAdapter:
 
         if tp_applicable and tp_base is not None:
             # STP rate is always 0 in the Reliance private-car grid
-            tp_rate = apply_adjustments(tp_base, "TP")
+            tp_rate = tp_base
             tp_ref = SourceRef(RELIANCE_FILENAME, file_sha, sheet=_SHEET_PC,
                                cell=f"F{row_num}" if row_num else None, role="rate_cell")
             tp.evidence = evidence_refs + [tp_ref]
@@ -322,6 +310,14 @@ class RelianceAdapter:
                 tp.calculation = (
                     f"TP premium {policy.tp_premium} × {tp_rate}% = {tp.commission_amount}"
                 )
+
+        # Adjustments and the EW note concern the OD payout only.
+        if od.applicable and od.status == DecisionStatus.RESOLVED:
+            od.issues.extend(a for a in dict.fromkeys(assumptions) if a not in od.issues)
+
+        # Adjustments and the EW note concern the OD payout only.
+        if od.applicable and od.status == DecisionStatus.RESOLVED:
+            od.issues.extend(a for a in dict.fromkeys(assumptions) if a not in od.issues)
 
         # SATP: OD not applicable; mark explicitly
         if product == "SATP":
@@ -405,8 +401,9 @@ class RelianceAdapter:
 
     def _has_zero_dep(self, policy: PolicyInput) -> bool:
         """Check if the policy has standalone zero-depreciation cover."""
-        return any("zero dep" in item.casefold() or "zero depreciation" in item.casefold()
-                   for item in (policy.add_ons or ()))
+        # Reliance schedules print zero-depreciation cover as "Nil Depreciation".
+        return any(term in item.casefold() for item in (policy.add_ons or ())
+                   for term in ("zero dep", "nil dep"))
 
     def _has_tyre_rti(self, policy: PolicyInput) -> bool:
         """Check if Tyre/RTI add-on bundle is present."""

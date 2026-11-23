@@ -111,8 +111,12 @@ class PolicyInput:
     vehicle_segment: str | None = None
     vehicle_category: str | None = None
     rto: str | None = None
+    # RTO code such as "UP78", read from the registration number.
+    rto_code: str | None = None
     geography: str | None = None
     zone: str | None = None
+    # Insurer territory column (e.g. Tata AIG 'UP1') when supplied by operator review.
+    territory: str | None = None
     od_premium: Decimal | None = None
     tp_premium: Decimal | None = None
     basic_od_premium: Decimal | None = None

@@ -57,8 +57,11 @@ class FakeRepository:
     def download_document(self, storage_path):
         return self.blob
 
-    def claim_analysis(self, user_id, document):
+    def claim_analysis(self, user_id, document, force=False):
         existing = next((a for a in self.analyses.values() if a["document_id"] == document["id"]), None)
+        if existing and force and existing["status"] == "completed":
+            existing["status"] = "processing"
+            return existing, True
         if existing:
             return existing, False
         row = {"id": str(uuid4()), "document_id": document["id"], "status": "processing",
@@ -179,3 +182,79 @@ def test_auth_rejects_missing_and_invalid_bearer(monkeypatch):
     with pytest.raises(HTTPException) as invalid:
         get_current_user(HTTPAuthorizationCredentials(scheme="Bearer", credentials="expired"))
     assert invalid.value.status_code == 401
+
+
+def _reliance_result(sha):
+    from decimal import Decimal
+    from app.rating_engine import review
+    from app.rating_engine.models import PolicyInput, SourceRef
+    doc = SourceRef("policy.pdf", sha, page=1, role="policy_fact")
+    policy = PolicyInput(insurer="Reliance General Insurance", policy_type="Private Car Package Policy",
+                         cover="Private Car Package Policy", engine_cc=1197, geography="Delhi",
+                         od_premium=Decimal("10000"), tp_premium=Decimal("3416"),
+                         source_evidence={k: [doc] for k in ("insurer", "policy_type", "engine_cc", "state",
+                                                               "od_premium", "tp_premium")})
+    return {"document": {"name": "policy.pdf", "sha256": sha, "ocr_pages_limited": False},
+            "assessment_status": "incomplete",
+            "facts": {"insurer": {"value": "reliance-indusind", "page": 1, "confidence": .99, "text": "Reliance",
+                                  "source": {"source_file": "policy.pdf", "source_sha256": sha, "page": 1, "role": "policy"}}},
+            "conflicts": {}, "low_confidence": {}, "missing_or_uncertain": [],
+            "policy_input": review.policy_to_dict(policy),
+            "decisions": {"overall": "ambiguous",
+                          "OD": {"status": "ambiguous", "applicable": True, "evidence": [], "issues": ["Fuel missing"]},
+                          "TP": {"status": "ambiguous", "applicable": True, "evidence": [], "issues": ["Fuel missing"]}}}
+
+
+def _analyzed(api, monkeypatch, result_factory=_reliance_result):
+    client, repo = api
+    upload = client.post("/api/v1/documents/upload", files={"file": ("policy.pdf", b"%PDF-1.7 review", "application/pdf")})
+    document_id, sha = upload.json()["id"], upload.json()["sha256"]
+    monkeypatch.setattr("app.main.document_to_decision", lambda *a, **k: SimpleNamespace(document_sha256=sha))
+    monkeypatch.setattr("app.main.result_dict", lambda _r: result_factory(sha))
+    started = client.post(f"/api/v1/documents/{document_id}/analyze")
+    assert started.status_code == 200
+    return client, repo, document_id, started.json()["analysis_id"]
+
+
+def test_review_endpoint_applies_overrides_and_persists_commission(api, monkeypatch):
+    client, repo, _doc, analysis_id = _analyzed(api, monkeypatch)
+    response = client.post(f"/api/v1/analyses/{analysis_id}/review", json={"overrides": {"fuel": "Petrol"}})
+    assert response.status_code == 200, response.text
+    result = response.json()["result"]
+    assert result["decisions"]["OD"]["status"] == "resolved"
+    assert result["decisions"]["OD"]["rate_percent"] == "22.5"  # Reliance Delhi petrol
+    assert result["decisions"]["OD"]["commission_amount"] == "2250.00"
+    assert result["totals"]["commission_total"] == "2250.00"
+    assert response.json()["assessment_complete"] is True
+    assert repo.save_count == 2
+    # Reset removes the override and returns to the document-only decision.
+    reset = client.post(f"/api/v1/analyses/{analysis_id}/review", json={"overrides": {}})
+    assert reset.json()["result"]["decisions"]["OD"]["status"] == "ambiguous"
+
+
+def test_review_endpoint_validates_input(api, monkeypatch):
+    client, _repo, _doc, analysis_id = _analyzed(api, monkeypatch)
+    bad = client.post(f"/api/v1/analyses/{analysis_id}/review", json={"overrides": {"fuel": "Steam"}})
+    assert bad.status_code == 422 and "Fuel" in bad.json()["detail"]
+    missing = client.post(f"/api/v1/analyses/{uuid4()}/review", json={"overrides": {}})
+    assert missing.status_code == 404
+
+
+def test_review_requires_stored_inputs(api, monkeypatch):
+    def legacy(sha):
+        result = _reliance_result(sha)
+        result.pop("policy_input")
+        return result
+    client, _repo, _doc, analysis_id = _analyzed(api, monkeypatch, legacy)
+    response = client.post(f"/api/v1/analyses/{analysis_id}/review", json={"overrides": {"fuel": "Petrol"}})
+    assert response.status_code == 409
+
+
+def test_forced_rerun_extracts_again(api, monkeypatch):
+    client, repo, document_id, analysis_id = _analyzed(api, monkeypatch)
+    assert client.post(f"/api/v1/documents/{document_id}/analyze").json()["idempotent_replay"] is True
+    rerun = client.post(f"/api/v1/documents/{document_id}/analyze?force=true")
+    assert rerun.status_code == 200 and rerun.json()["idempotent_replay"] is False
+    assert repo.save_count == 2
+
+

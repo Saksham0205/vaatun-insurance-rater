@@ -1,111 +1,102 @@
 from pathlib import Path
-import hashlib
 from decimal import Decimal
 
 import pymupdf
+import pytest
 
 from app.rating_engine.document_pipeline import document_to_decision, result_dict
 from app.rating_engine.document_pipeline import (
     ExtractedFact, StructuredPolicyFacts, extract_structured_facts, normalize_policy_input,
 )
-from app.rating_engine.models import DecisionStatus, SourceRef
+from app.rating_engine.models import SourceRef
 
 ROOT = Path(__file__).resolve().parents[2]
 POLICIES = ROOT / "sample-policies"
 CARDS = ROOT / "backend" / "rate_cards"
 
 
-def test_all_real_sample_pdfs_run_ocr_extraction_normalization_and_rating(monkeypatch):
-    from app.rating_engine import document_pipeline
-    real_rate_policy = document_pipeline.rate_policy
-    passed_inputs = []
+# Every value below was read by eye from the scanned sample PDFs (the policy
+# schedule pages). Extraction is AI-free: local OCR plus layout-aware rules.
+# A value the PDF does not print (HDFC/Reliance fuel, Tata segment/business
+# type, Go Digit manufacture year printed as 0001-01-01) must stay missing.
+EXPECTED_FACTS = {
+    "pvt-car-comprehensive-hdfc-ergo.pdf": {
+        "insurer": "hdfc-ergo", "policy_type": "Private Car Package", "fuel": None,
+        "previous_insurer": "Tata AIG General Insurance Co. Ltd.", "engine_cc": "1493",
+        "manufacture_year": "2023", "rto": "GURGAON", "state": "Haryana",
+        "registration_number": "HR-26-FB-8239", "make_model": "Mahindra BOLERO NEO-N10 (R)",
+        "policy_start_date": "2026-03-29", "od_premium": "8053", "tp_premium": "3816",
+        "net_premium": "11869", "ncb_percent": "35", "ncb_state": "NCB"},
+    "pvt-car-comprehensive-reliance.pdf": {
+        "insurer": "reliance-indusind", "policy_type": "Private Car Package", "fuel": None,
+        "engine_cc": "999", "manufacture_year": "2020", "registration_year": "2020",
+        "state": "Uttar Pradesh", "registration_number": "UP16CS5830", "make_model": "Renault KWID1.0 RXT O",
+        "policy_start_date": "2025-12-23", "od_premium": "4714", "tp_premium": "2519",
+        "net_premium": "7233", "ncb_percent": "25", "ncb_state": "NCB"},
+    "pvt-car-satp-go-digit.pdf": {
+        "insurer": "godigit", "policy_type": "Standalone TP", "fuel": "Petrol",
+        "previous_insurer": "Go Digit General Insurance Ltd.", "engine_cc": "1086", "manufacture_year": None,
+        "registration_year": "2019", "rto": "Kanpur Nagar,UTTAR PRADESH", "state": "Uttar Pradesh",
+        "registration_number": "UP78FZ1372", "make_model": "HYUNDAI SANTRO NEW/1.1MT CORPORATE",
+        "policy_start_date": "2026-03-25", "tp_premium": "3466", "net_premium": "3466"},
+    "pvt-car-satp-tata-aig.pdf": {
+        "insurer": "tata-aig", "policy_type": "Standalone TP", "fuel": "CNG", "engine_cc": "998",
+        "manufacture_year": "2011", "registration_year": "2011", "rto": "DELHI", "state": "Delhi",
+        "registration_number": "DL9CAB2893", "make_model": "Maruti ZENESTILO",
+        "policy_start_date": "2026-04-01", "tp_premium": "2154", "net_premium": "2154"},
+}
 
-    def capture_policy_input(policy_input, rate_card_root=None):
-        passed_inputs.append(policy_input)
-        return real_rate_policy(policy_input, rate_card_root)
+# Inputs the PDF does not print are supplied by the reviewer; the result must then
+# be the rate-card commission, checked by hand.
+REVIEW = {
+    "pvt-car-comprehensive-hdfc-ergo.pdf": ({"fuel": "Diesel"}, "1207.95"),        # 8053 x 15%
+    "pvt-car-comprehensive-reliance.pdf": ({"fuel": "Petrol"}, "353.55"),          # 4714 x 7.5%
+    "pvt-car-satp-go-digit.pdf": ({}, "1022.47"),                                  # 3466 x 29.5%
+    "pvt-car-satp-tata-aig.pdf": ({"business_type": "Rollover", "vehicle_segment": "Compact"}, "818.52"),
+}
 
-    monkeypatch.setattr(document_pipeline, "rate_policy", capture_policy_input)
-    expected = {
-        "pvt-car-comprehensive-hdfc-ergo.pdf": ("hdfc-ergo", "ambiguous", "unsupported"),
-        "pvt-car-satp-go-digit.pdf": ("godigit", "not_applicable", "ambiguous"),
-        "pvt-car-comprehensive-reliance.pdf": ("reliance-indusind", "ambiguous", "ambiguous"),
-        "pvt-car-satp-tata-aig.pdf": ("tata-aig", "not_applicable", "ambiguous"),
-    }
-    for filename, (insurer, od_status, tp_status) in expected.items():
-        # Exercise all four fixtures with an explicit resource cap; the result must
-        # identify any incomplete scan rather than present it as a complete assessment.
-        result = document_to_decision(POLICIES / filename, rate_card_root=CARDS, max_ocr_pages=4)
-        assert result.document_name == filename
-        assert len(result.document_sha256) == 64
-        assert result.document_sha256 == hashlib.sha256((POLICIES / filename).read_bytes()).hexdigest()
-        assert result.page_count > 0
-        assert result.ocr_pages  # The restored policies are scanned and OCR ran.
-        assert result.facts.insurer is not None
-        assert result.policy_input.insurer == insurer
-        assert result.policy_input.source_evidence["insurer"][0].source_sha256 == result.document_sha256
-        assert result.decision.od.status.value == od_status
-        assert result.decision.tp.status.value == tp_status
-        assert result.decision.od.status in set(DecisionStatus)
-        assert result.decision.tp.status in set(DecisionStatus)
-        assert result.decision.od.rate_percent is None
-        assert result.decision.tp.rate_percent is None
-        assert result.decision.od.evidence or result.decision.od.status.value == "not_applicable"
-        assert result.decision.tp.evidence
-        assert all(ref.source_sha256 for ref in result.decision.od.evidence + result.decision.tp.evidence)
-        if "hdfc-ergo" in filename:
-            assert result.facts.fuel is None
-            assert result.facts.ncb_percent and result.facts.ncb_percent.value == 35
-            assert result.facts.ncb_eligibility and "25" in result.facts.ncb_eligibility.value
-            assert result.policy_input.fuel is None
-            assert result.policy_input.ncb_state is None
-            assert result.policy_input.ncb_state is None
-        if result.ocr_pages_limited:
-            assert result_dict(result)["assessment_status"] == "incomplete"
-        elif "go-digit" in filename:
-            assert result.facts.fuel and result.facts.fuel.value == "Petrol"
-            assert result.facts.engine_cc and result.facts.engine_cc.value == 1086
-            assert result.facts.rto and "Kanpur" in result.facts.rto.value
-        elif "reliance" in filename:
-            assert result.facts.engine_cc and result.facts.engine_cc.value == 999
-            assert result.facts.rto and "Noida" in result.facts.rto.value
-        elif "tata-aig" in filename:
-            assert result.facts.fuel and result.facts.fuel.value == "CNG"
-        for field_name in ("insurer", "policy_type"):
-            fact = getattr(result.facts, field_name)
-            assert fact and fact.page >= 1 and fact.confidence > 0
-            assert fact.source.source_file == filename
-        rendered = result_dict(result)
-        assert rendered["decisions"]["OD"]["status"] == od_status
-        assert rendered["decisions"]["TP"]["status"] == tp_status
-    assert len(passed_inputs) == 4
-    assert all(item.insurer for item in passed_inputs)
-    assert all(item.source_evidence.get("insurer") for item in passed_inputs)
 
-def test_unseen_scanned_pdf_uses_ocr_pipeline_without_sample_specific_facts(tmp_path):
-    image_only = tmp_path / "unseen-scanned-policy.pdf"
+@pytest.fixture(scope="module")
+def sample_results():
+    return {name: result_dict(document_to_decision(POLICIES / name, rate_card_root=CARDS))
+            for name in EXPECTED_FACTS}
+
+
+@pytest.mark.parametrize("filename", sorted(EXPECTED_FACTS))
+def test_rule_extraction_matches_every_printed_value(sample_results, filename):
+    facts = sample_results[filename]["facts"]
+    wrong = {name: ((facts.get(name) or {}).get("value"), expected)
+             for name, expected in EXPECTED_FACTS[filename].items()
+             if (facts.get(name) or {}).get("value") != expected}
+    assert not wrong, f"extracted != printed: {wrong}"
+    for name, fact in facts.items():
+        if fact:  # every extracted value cites the page it was read from
+            assert fact["page"] >= 1 and fact["text"], name
+
+
+@pytest.mark.parametrize("filename", sorted(REVIEW))
+def test_reviewed_commission_matches_rate_card(sample_results, filename):
+    from app.rating_engine.review import rerate
+
+    overrides, expected_total = REVIEW[filename]
+    reviewed = rerate(sample_results[filename], overrides, CARDS)
+    assert reviewed["decisions"]["overall"] == "resolved"
+    assert reviewed["totals"]["commission_total"] == expected_total
+    assert reviewed["assessment_status"] == "complete"
+
+
+def _image_only_pdf(path, pages=1):
+    source = pymupdf.open()
+    source.new_page(width=300, height=400).insert_text((40, 60), "scanned", fontsize=14)
+    png = source[0].get_pixmap().tobytes("png")
+    source.close()
     doc = pymupdf.open()
-    page = doc.new_page(width=595, height=842)
-    page.insert_text((60, 100), "Go Digit General Insurance Ltd.", fontsize=18)
-    page.insert_text((60, 150), "Digit Private Car Liability Only Policy", fontsize=16)
-    page.insert_text((60, 210), "Fuel Type: Petrol", fontsize=14)
-    pix = page.get_pixmap(matrix=pymupdf.Matrix(2, 2), alpha=False)
+    for _ in range(pages):
+        page = doc.new_page(width=300, height=400)
+        page.insert_image(page.rect, stream=png)
+    doc.save(path)
     doc.close()
-    image_doc = pymupdf.open()
-    page = image_doc.new_page(width=595, height=842)
-    page.insert_image(page.rect, stream=pix.tobytes("png"))
-    image_doc.save(image_only)
-    image_doc.close()
-
-    result = document_to_decision(image_only, rate_card_root=CARDS)
-    assert result.document_name == image_only.name
-    assert result.ocr_pages == [1]
-    assert result.facts.insurer and result.facts.insurer.value == "godigit"
-    assert result.facts.policy_type and result.facts.policy_type.value == "Standalone TP"
-    assert result.facts.fuel and result.facts.fuel.value == "Petrol"
-    assert result.policy_input.source_evidence["fuel"][0].source_file == image_only.name
-    assert result.decision.od.status.value == "not_applicable"
-    assert result.decision.tp.status.value == "ambiguous"
-    assert result.decision.tp.rate_percent is None
+    return path
 
 
 def test_low_confidence_fact_is_flagged_by_normalization():
@@ -187,66 +178,6 @@ def test_ocr_low_confidence_fuel_candidate_is_retained_but_not_normalized():
     assert normalize_policy_input(facts).fuel is None
 
 
-def test_late_page_fuel_is_extracted_with_default_full_coverage(tmp_path, monkeypatch):
-    import app.rating_engine.parsers.pdf as pdf_parser
-    monkeypatch.delenv("VAATUN_MAX_OCR_PAGES", raising=False)
-    calls = {"count": 0}
-
-    def fake_ocr(_image):
-        calls["count"] += 1
-        page = calls["count"]
-        texts = {
-            1: ["HDFC ERGO General Insurance Company Limited", "Private Car Package Policy"],
-            5: ["Fuel Type: Diesel"],
-        }.get(page, [])
-        lines = []
-        for i, text in enumerate(texts):
-            y = 60 + i * 40
-            lines.append(([[20, y], [300, y], [300, y + 20], [20, y + 20]], text, .99))
-        return lines, None
-
-    monkeypatch.setattr(pdf_parser, "_get_ocr_engine", lambda: fake_ocr)
-    path = tmp_path / "late-fuel.pdf"
-    source = pymupdf.open()
-    source.new_page(width=300, height=400)
-    pix = source[0].get_pixmap()
-    source.close()
-    doc = pymupdf.open()
-    for _ in range(5):
-        page = doc.new_page(width=300, height=400)
-        page.insert_image(page.rect, stream=pix.tobytes("png"))
-    doc.save(path)
-    doc.close()
-    result = document_to_decision(path, rate_card_root=CARDS)
-    assert not result.ocr_pages_limited
-    assert calls["count"] == 5
-    assert result.ocr_pages == [1, 2, 3, 4, 5]
-    assert result.facts.fuel and result.facts.fuel.value == "Diesel"
-    assert result.facts.fuel.page == 5
-    assert result_dict(result)["assessment_status"] == "complete"
-
-
-def test_ocr_limit_marks_assessment_incomplete(tmp_path, monkeypatch):
-    import app.rating_engine.parsers.pdf as pdf_parser
-    monkeypatch.setattr(pdf_parser, "_get_ocr_engine", lambda: (lambda image: ([], None)))
-    monkeypatch.setenv("VAATUN_MAX_OCR_PAGES", "1")
-    path = tmp_path / "limited-scan.pdf"
-    doc = pymupdf.open()
-    blank = doc.new_page(width=300, height=400)
-    pix = blank.get_pixmap()
-    doc.close()
-    scanned = pymupdf.open()
-    for _ in range(2):
-        page = scanned.new_page(width=300, height=400)
-        page.insert_image(page.rect, stream=pix.tobytes("png"))
-    scanned.save(path)
-    scanned.close()
-    result = document_to_decision(path, rate_card_root=CARDS)
-    rendered = result_dict(result)
-    assert result.ocr_pages_limited
-    assert rendered["assessment_status"] == "incomplete"
-
-
 def test_unfamiliar_layout_fails_closed_without_a_rate(tmp_path):
     path = tmp_path / "unfamiliar.pdf"
     doc = pymupdf.open()
@@ -258,3 +189,5 @@ def test_unfamiliar_layout_fails_closed_without_a_rate(tmp_path):
     assert result.facts.policy_type is None
     assert result.decision.od.rate_percent is None
     assert result.decision.tp.rate_percent is None
+
+

@@ -10,7 +10,8 @@ from typing import Any
 from .engine import rate_policy
 from .models import AnalysisDecision, PolicyInput, SourceRef
 from .parsers.pdf import parse_pdf
-from .gemini_extraction import extract_pdf
+from .insurer_rules import apply_insurer_rules
+from . import review
 
 CONFIDENCE_FLOOR = 0.72
 
@@ -31,9 +32,11 @@ class StructuredPolicyFacts:
     previous_insurer: ExtractedFact | None = None
     business_type: ExtractedFact | None = None
     policy_type: ExtractedFact | None = None
+    policy_start_date: ExtractedFact | None = None
     fuel: ExtractedFact | None = None
     engine_cc: ExtractedFact | None = None
     manufacture_year: ExtractedFact | None = None
+    registration_year: ExtractedFact | None = None
     rto: ExtractedFact | None = None
     state: ExtractedFact | None = None
     registration_number: ExtractedFact | None = None
@@ -42,10 +45,12 @@ class StructuredPolicyFacts:
     make_model: ExtractedFact | None = None
     od_premium: ExtractedFact | None = None
     tp_premium: ExtractedFact | None = None
+    net_premium: ExtractedFact | None = None
     basic_od_premium: ExtractedFact | None = None
     basic_tp_premium: ExtractedFact | None = None
     ncb_discount_amount: ExtractedFact | None = None
     total_addon_premium: ExtractedFact | None = None
+    add_ons: ExtractedFact | None = None
     total_package_premium: ExtractedFact | None = None
     integrated_tax: ExtractedFact | None = None
     total_premium: ExtractedFact | None = None
@@ -197,7 +202,6 @@ def _search(lines, pattern, converter=lambda m: m.group(1), confidence_floor=CON
 
 def extract_structured_facts(parsed: dict[str, Any]) -> StructuredPolicyFacts:
     lines = list(_lines(parsed))
-    all_text = "\n".join(text for _, text, _ in lines)
     out = StructuredPolicyFacts()
 
     insurer_names = [
@@ -334,6 +338,8 @@ def extract_structured_facts(parsed: dict[str, Any]) -> StructuredPolicyFacts:
         ("manufacture_year", r"(?:Year\s*of\s*Manufacture|Manufacture\s*Year|MFG\.?\s*Year)\s*[:\-]?\s*((?:19|20)[0-9]{2})", lambda m: int(m.group(1))),
         ("od_premium", r"(?:Net|Total)\s+Own\s+Damage\s+Premium\s*\(a\)\s*[:\s\u20b9]*([0-9,]+(?:\.[0-9]{1,2})?)", lambda m: Decimal(m.group(1).replace(",", ""))),
         ("tp_premium", r"Net\s+Liability\s+Premium\s*\(b\)\s*[:\s\u20b9]*([0-9,]+(?:\.[0-9]{1,2})?)", lambda m: Decimal(m.group(1).replace(",", ""))),
+        ("registration_number", r"Registration\s*(?:No\.?|Number)\s*[:\-]?\s*([A-Z]{2}[\s-]*[0-9]{1,2}[\s-]*[A-Z]{0,3}[\s-]*[0-9]{1,4})\b",
+         lambda m: re.sub(r"[\s-]+", "", m.group(1)).upper()),
     ):
         if getattr(out, name) is not None or name in out.conflicts:
             continue
@@ -344,7 +350,7 @@ def extract_structured_facts(parsed: dict[str, Any]) -> StructuredPolicyFacts:
 
     # A schedule can print several explicitly labelled OD totals. Retain all of
     # them as a conflict instead of letting a first-match fallback silently pick
-    # one; Gemini can then supply the independently cited net premium.
+    # one; the layout rules can then supply the cited net premium.
     if out.od_premium is None and "od_premium" not in out.conflicts:
         od_candidates = []
         for page, text, confidence in lines:
@@ -473,13 +479,107 @@ def extract_structured_facts(parsed: dict[str, Any]) -> StructuredPolicyFacts:
     return out
 
 
+# Indian registration marks begin with the state's code (Motor Vehicles Act
+# schedule), so a printed registration number identifies the registration state
+# and RTO code even when the schedule does not print them separately.
+REGISTRATION_STATES = {
+    "AN": "Andaman and Nicobar Islands", "AP": "Andhra Pradesh", "AR": "Arunachal Pradesh",
+    "AS": "Assam", "BR": "Bihar", "CG": "Chhattisgarh", "CH": "Chandigarh", "DD": "Daman and Diu",
+    "DL": "Delhi", "DN": "Dadra and Nagar Haveli", "GA": "Goa", "GJ": "Gujarat", "HP": "Himachal Pradesh",
+    "HR": "Haryana", "JH": "Jharkhand", "JK": "Jammu and Kashmir", "KA": "Karnataka", "KL": "Kerala",
+    "LA": "Ladakh", "LD": "Lakshadweep", "MH": "Maharashtra", "ML": "Meghalaya", "MN": "Manipur",
+    "MP": "Madhya Pradesh", "MZ": "Mizoram", "NL": "Nagaland", "OD": "Odisha", "OR": "Odisha",
+    "PB": "Punjab", "PY": "Puducherry", "RJ": "Rajasthan", "SK": "Sikkim", "TN": "Tamil Nadu",
+    "TR": "Tripura", "TS": "Telangana", "UK": "Uttarakhand", "UA": "Uttarakhand",
+    "UP": "Uttar Pradesh", "WB": "West Bengal",
+}
+_REGISTRATION_MARK = re.compile(
+    r"^\s*([A-Z]{2})[\s-]*([0-9]{1,2})[\s-]*([A-Z]{1,3})(?:[\s-]*([A-Z]{1,3}))?[\s-]*[0-9]{1,4}\s*$", re.I)
+
+
+def _registration_parts(registration: Any) -> tuple[str | None, str | None]:
+    """Return (state name, RTO code such as 'UP78' or 'DL9C') from a registration mark."""
+    match = _REGISTRATION_MARK.match(str(registration or ""))
+    if not match:
+        return None, None
+    code, district, series, second_series = match.groups()
+    state = REGISTRATION_STATES.get(code.upper())
+    if not state:
+        return None, None
+    # Delhi-style marks (DL 9C AB 2893) carry a one-letter series in the RTO code.
+    if second_series and len(series) == 1:
+        return state, f"{code}{int(district)}{series}".upper()
+    if code.upper() == "DL" and not second_series and len(series) == 3:
+        return state, f"{code}{int(district)}{series[0]}".upper()  # 'DL9CAB2893' -> DL9C
+    return state, f"{code}{int(district):02d}".upper()
+
+
+def _year(value: Any) -> int | None:
+    match = re.search(r"\b(19[5-9][0-9]|20[0-9]{2})\b", str(value or ""))
+    return int(match.group(1)) if match else None
+
+
+_REGISTRATION_TOKEN = re.compile(r"\b([A-Z]{2}[0-9]{1,2}[A-Z]{1,3}[0-9]{4})\b")
+
+
+def _fallback_registration_number(parsed: dict[str, Any], facts: StructuredPolicyFacts) -> None:
+    """OCR often emits a registration mark away from its label. When no labelled
+    value was found, accept the mark that clearly dominates the pages that
+    mention "Registration" (e.g. repeated in every page footer)."""
+    if facts.registration_number is not None or "registration_number" in facts.conflicts:
+        return
+    counts: dict[str, int] = {}
+    first_page: dict[str, int] = {}
+    for page in parsed["pages"]:
+        text = page.get("text") or ""
+        if not re.search(r"registration", text, re.I):
+            continue
+        for mark in _REGISTRATION_TOKEN.findall(text.upper()):
+            if _registration_parts(mark)[1]:
+                counts[mark] = counts.get(mark, 0) + 1
+                first_page.setdefault(mark, page["page_number"])
+    if not counts:
+        return
+    ranked = sorted(counts.items(), key=lambda item: -item[1])
+    if len(ranked) > 1 and ranked[0][1] < 2 * ranked[1][1]:
+        return
+    mark = ranked[0][0]
+    facts.registration_number = _fact(parsed, first_page[mark], mark, 0.8, mark,
+                                      "Vehicle Registration No. (OCR, most frequent mark)")
+
+
+def _derive_registration_state(parsed: dict[str, Any], facts: StructuredPolicyFacts) -> None:
+    if facts.state is not None or "state" in facts.conflicts or facts.registration_number is None:
+        return
+    registration = facts.registration_number
+    state, _ = _registration_parts(registration.value)
+    if state:
+        facts.state = _fact(parsed, registration.page, registration.text, registration.confidence,
+                            state, "Registration state (from registration number)")
+
+
 def normalize_policy_input(facts: StructuredPolicyFacts) -> PolicyInput:
     def val(name):
         fact = getattr(facts, name)
         return fact.value if fact is not None and fact.confidence >= CONFIDENCE_FLOOR and name not in facts.conflicts else None
 
+    # Vehicle age is measured at the start of the current policy period. A
+    # registration year stands in only when no plausible manufacture year exists.
+    start_year = _year(val("policy_start_date"))
+    built_year = _year(val("manufacture_year"))
+    age_source = "manufacture_year"
+    if built_year is None or (start_year is not None and built_year > start_year):
+        built_year, age_source = _year(val("registration_year")), "registration_year"
+    vehicle_age = start_year - built_year if start_year is not None and built_year is not None and start_year >= built_year else None
+    _, rto_code = _registration_parts(val("registration_number"))
+    add_ons = val("add_ons")
+
     refs: dict[str, list[SourceRef]] = {}
-    for name in ("insurer", "previous_insurer", "business_type", "policy_type", "fuel", "engine_cc", "rto", "state", "make", "model", "od_premium", "tp_premium", "basic_od_premium", "basic_tp_premium", "ncb_discount_amount", "total_addon_premium", "total_package_premium", "integrated_tax", "total_premium", "ncb_percent", "ncb_state"):
+    if vehicle_age is not None:
+        refs["vehicle_age_years"] = [facts.policy_start_date.source, getattr(facts, age_source).source]
+    if rto_code:
+        refs["rto_code"] = [facts.registration_number.source]
+    for name in ("insurer", "previous_insurer", "business_type", "policy_type", "fuel", "engine_cc", "rto", "state", "make", "model", "od_premium", "tp_premium", "net_premium", "basic_od_premium", "basic_tp_premium", "ncb_discount_amount", "total_addon_premium", "add_ons", "total_package_premium", "integrated_tax", "total_premium", "ncb_percent", "ncb_state"):
         fact = getattr(facts, name)
         if fact:
             refs[name] = [fact.source]
@@ -488,10 +588,13 @@ def normalize_policy_input(facts: StructuredPolicyFacts) -> PolicyInput:
     return PolicyInput(
         insurer=val("insurer"), previous_insurer=val("previous_insurer"), business_type=val("business_type"),
         policy_type=val("policy_type"), cover=val("policy_type"), fuel=val("fuel"),
-        engine_cc=val("engine_cc"), make=(val("make") or val("make_model")), model=val("model"),
-        rto=val("rto"), geography=val("state"), od_premium=val("od_premium"), tp_premium=val("tp_premium"),
+        engine_cc=val("engine_cc"), vehicle_age_years=vehicle_age,
+        make=(val("make") or val("make_model")), model=val("model"),
+        rto=val("rto"), rto_code=rto_code, geography=val("state"),
+        od_premium=val("od_premium"), tp_premium=val("tp_premium"), net_premium=val("net_premium"),
         basic_od_premium=val("basic_od_premium"), basic_tp_premium=val("basic_tp_premium"),
         ncb_discount_amount=val("ncb_discount_amount"), add_on_premium=val("total_addon_premium"),
+        add_ons=tuple(add_ons) if add_ons else None,
         total_package_premium=val("total_package_premium"), gst=val("integrated_tax"),
         total_premium_including_tax=val("total_premium"), ncb_percent=val("ncb_percent"),
         ncb_state=val("ncb_state"),
@@ -499,56 +602,23 @@ def normalize_policy_input(facts: StructuredPolicyFacts) -> PolicyInput:
 
 
 def document_to_decision(path: str | Path, *, rate_card_root: str | Path | None = None) -> DocumentDecision:
+    """Extract and rate one policy without any AI service.
+
+    Text comes from the PDF text layer or, for scanned pages, local OCR
+    (RapidOCR). Facts are read by deterministic label/value rules plus
+    insurer-specific schedule rules; anything not printed is left for the
+    reviewer to supply rather than guessed.
+    """
     parsed = parse_pdf(path)
     facts = extract_structured_facts(parsed)
-    ai, metadata = extract_pdf(path, {p["page_number"]: p.get("text", "") for p in parsed["pages"]})
-    if ai:
-        # Gemini is primary only for independently verified, non-conflicting evidence.
-        for name, candidates in ai.fields.items():
-            values = {str(c.normalized_value) for c in candidates if c.normalized_value is not None}
-            if len(values) != 1 or not hasattr(facts, name):
-                if len(values) > 1:
-                    facts.missing_or_uncertain.append(f"{name} has conflicting AI candidates")
-                continue
-            # Keep a deterministic, non-conflicting extraction as the canonical
-            # value. Gemini fills gaps (including parser conflicts) but must not
-            # replace a verified insurer key or other rating fact with a display
-            # variation returned by the model.
-            if getattr(facts, name) is not None and name not in facts.conflicts:
-                continue
-            candidate = candidates[0]
-            value = candidate.normalized_value
-            if name in {"engine_cc", "manufacture_year"}:
-                try: value = int(value)
-                except (TypeError, ValueError): continue
-            if name in {"od_premium", "tp_premium", "basic_od_premium", "basic_tp_premium", "total_package_premium", "total_premium", "ncb_percent"}:
-                try: value = Decimal(str(value).replace(",", ""))
-                except Exception: continue
-            # The model supplied one independently observed value for a local
-            # parser conflict, so that ambiguity is now resolved rather than
-            # continuing to suppress the commission input during normalization.
-            facts.conflicts.pop(name, None)
-            setattr(facts, name, _fact(parsed, candidate.page or 1, candidate.evidence or "", candidate.confidence or 0.0, value, candidate.source_label))
-        # Ensure make_model is populated from make and model when extracted by Gemini
-        if (not facts.make_model or facts.make_model.value is None) and (facts.make or facts.model):
-            make_str = str(getattr(facts.make, "value", "") or "").strip()
-            model_str = str(getattr(facts.model, "value", "") or "").strip()
-            combined = f"{make_str} {model_str}".strip()
-            if combined:
-                ref = facts.make or facts.model
-                evidence_text = f"{getattr(facts.make, 'text', '')}; {getattr(facts.model, 'text', '')}".strip("; ")
-                facts.make_model = _fact(
-                    parsed,
-                    ref.page or 1,
-                    evidence_text or combined,
-                    min(getattr(facts.make, "confidence", 0.9) if facts.make else 1.0,
-                        getattr(facts.model, "confidence", 0.9) if facts.model else 1.0),
-                    combined,
-                    "Make / Model"
-                )
+    apply_insurer_rules(parsed, facts)
+    _fallback_registration_number(parsed, facts)
+    _derive_registration_state(parsed, facts)
     if parsed.get("ocr_pages_limited"):
         facts.missing_or_uncertain.append(
-            "Some scanned pages could not be read as selectable text; Gemini extraction covers the full PDF")
+            "Some scanned pages were beyond the OCR page limit (LOCAL_OCR_MAX_PAGES).")
+    metadata = {"status": "completed", "engine": "local",
+                "ocr_pages": [page["page_number"] for page in parsed["pages"] if page.get("ocr_used")]}
     policy = normalize_policy_input(facts)
     decision = rate_policy(policy, rate_card_root) if rate_card_root else rate_policy(policy)
     return DocumentDecision(parsed["document_name"], parsed["sha256"], parsed["page_count"],
@@ -560,7 +630,8 @@ def result_dict(result: DocumentDecision) -> dict[str, Any]:
     def fact_dict(fact):
         if fact is None:
             return None
-        return {"value": str(fact.value), "page": fact.page, "confidence": fact.confidence,
+        value = ", ".join(map(str, fact.value)) if isinstance(fact.value, (list, tuple)) else str(fact.value)
+        return {"value": value, "page": fact.page, "confidence": fact.confidence,
                 "text": fact.text, "source": asdict(fact.source)}
 
     return {
@@ -569,18 +640,25 @@ def result_dict(result: DocumentDecision) -> dict[str, Any]:
                      "ocr_pages_limited": result.ocr_pages_limited},
         "facts": {name: fact_dict(getattr(result.facts, name)) for name in (
             "insurer", "previous_insurer", "business_type", "policy_type", "fuel", "engine_cc", "manufacture_year",
-            "rto", "state", "make_model", "od_premium", "tp_premium", "ncb_percent", "ncb_eligibility", "ncb_state")},
+            "rto", "state", "registration_number", "make_model", "policy_start_date", "registration_year",
+            "od_premium", "tp_premium", "net_premium", "add_ons", "ncb_percent", "ncb_eligibility", "ncb_state")},
         "conflicts": {k: [fact_dict(f) for f in values] for k, values in result.facts.conflicts.items()},
         "low_confidence": {k: [fact_dict(f) for f in values] for k, values in result.facts.low_confidence.items()},
         "missing_or_uncertain": result.facts.missing_or_uncertain,
-        "assessment_status": "incomplete" if result.ocr_pages_limited else "complete",
+        "assessment_status": review.assessment_status(result.decision, result.ocr_pages_limited),
         "ai_extraction": result.extraction_metadata,
+        # Extracted inputs (with evidence) are kept so a reviewer can correct them and re-rate.
+        "policy_input": review.policy_to_dict(result.policy_input),
+        "rating_inputs": review.rating_inputs(result.policy_input),
+        "overrides": {},
+        "rating_trace": result.decision.trace,
+        "totals": review.totals(result.decision),
         "decisions": {"overall": result.decision.status.value,
-                      "OD": _decision_dict(result.decision.od), "TP": _decision_dict(result.decision.tp)},
+                      "OD": decision_dict(result.decision.od), "TP": decision_dict(result.decision.tp)},
     }
 
 
-def _decision_dict(decision):
+def decision_dict(decision):
     return {"status": decision.status.value, "applicable": decision.applicable,
             "rate_percent": str(decision.rate_percent) if decision.rate_percent is not None else None,
             "commission_amount": str(decision.commission_amount) if decision.commission_amount is not None else None,
@@ -588,3 +666,4 @@ def _decision_dict(decision):
             "rate_basis": decision.rate_basis, "selected_conditions": decision.selected_conditions,
             "calculation": decision.calculation,
             "evidence": [asdict(ref) for ref in decision.evidence], "issues": decision.issues}
+    

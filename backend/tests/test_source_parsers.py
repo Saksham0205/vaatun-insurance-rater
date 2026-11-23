@@ -1,6 +1,8 @@
 """Parser tests against the real supplied rate-card files; these are not policy validation."""
 from pathlib import Path
 
+import pytest
+
 from app.rating_engine.catalog import source_audit
 from app.rating_engine.parsers import parse_pdf, parse_workbook
 from app.rating_engine.adapters.hdfc import HDFCAdapter
@@ -12,6 +14,8 @@ ROOT = Path(__file__).resolve().parents[2]
 RATE_CARDS = ROOT / "backend" / "rate_cards"
 
 
+@pytest.mark.skipif(not (ROOT / "MANIFEST.json").is_file(),
+                    reason="MANIFEST.json (source-file checksums) is not in the repository")
 def test_bundle_audit_verifies_restored_fixtures_and_manifest():
     audit = source_audit(ROOT)
     assert len(audit["rate_cards"]) == 4
@@ -56,7 +60,7 @@ def test_hdfc_rate_rules_parse_source_values_and_exact_pdf_references():
     assert z1.source_value.original_value is not None
 
 
-def test_hdfc_od_resolves_from_real_grid_with_synthetic_policy_facts_and_tp_stays_unsupported():
+def test_hdfc_od_resolves_from_real_grid_with_synthetic_policy_facts_and_tp_not_applicable():
     policy_ref = SourceRef("synthetic-policy.pdf", page=1, role="synthetic_policy_evidence")
     policy = PolicyInput(
         insurer="HDFC ERGO", policy_type="Package", cover="Package", zone="Zone 1",
@@ -67,5 +71,5 @@ def test_hdfc_od_resolves_from_real_grid_with_synthetic_policy_facts_and_tp_stay
     assert result.od.status.value == "resolved"
     assert str(result.od.rate_percent) == "17.5"
     assert result.od.evidence[-1].source_file == HDFCAdapter(RATE_CARDS).path.name
-    assert result.tp.status.value == "unsupported"
-    assert result.status.value == "unsupported"  # OD resolves; TP is deliberately unresolved.
+    assert result.tp.status.value == "not_applicable"  # the HDFC grid pays on OD only
+    assert result.status.value == "resolved"

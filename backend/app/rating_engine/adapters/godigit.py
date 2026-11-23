@@ -2,29 +2,13 @@
 
 Source: Large Insurance Brokers Mar'26 - Shared.xlsx
 
-Implemented:
-  - 4W SATP: cluster/segment/age → Max CD2 lookup.
-    Status: Per prompt, the meaning of Max CD2 as a payable commission percentage
-    has not been independently verified in this source (no formula trail or explicit
-    instruction linking Max CD2 to actual payout rate was found in the workbook).
-    Result is returned as AMBIGUOUS with the raw value preserved, so Vaatun can
-    confirm before commission is displayed.
-
-  - 4W New Business 1+3: cluster × make-group → CD2 rate.
-    The column header says "CD2 for New Business 1+3".  The decimal values (0.195 –
-    0.30) are consistent with commission percentages (multiply by 100 to get %).
-    This adapter reads the table as percentages. Status: RESOLVED where unambiguous.
-
-  - Renault conflict: Renault appears in both "HEV-Mercedes Benz, Ford, BMW … Renault"
-    and "Maruti, MG, Skoda, Volks, Honda, Renault, Others".  When the make matches
-    Renault, the status is AMBIGUOUS — both groups are returned as candidates.
-
-RTO mapping:
-  - 4W SATP uses column "4WTP" (index 2 in RTO sheet).
-  - 4W New Business / Package uses column "4W Package" (index 3).
-  - 4W SAOD uses column "4WSAOD" (index 4).
-
-IMPORTANT: We do not auto-derive commission % from Max CD2.
+  - 4W SATP: RTO code -> 4WTP cluster, fuel/CC segment and age band -> "Max CD2".
+    Max CD2 is read as the payout rate in decimal form (0.295 = 29.5%), as on the
+    New Business 1+3 sheet, applied to the TP premium and disclosed as an assumption.
+  - 4W New Business 1+3: RTO code -> 4W Package cluster, make group -> CD2 rate on the
+    OD premium (new business only).
+  - Renault appears in two make groups, so a Renault make stays ambiguous.
+  - The workbook has no 4W SAOD grid, so SAOD is unsupported.
 """
 from __future__ import annotations
 
@@ -110,11 +94,7 @@ def _sha256(path: Path) -> str:
 
 
 class GoDigitAdapter:
-    """Go Digit 4W private-car rate adapter.
-
-    4W SATP: Max CD2 meaning is not verified → returns AMBIGUOUS with raw value.
-    4W New Business 1+3: CD2 column is verified as commission rate → RESOLVED.
-    """
+    """Go Digit 4W private-car rate adapter (4W SATP and New Business 1+3)."""
     insurer_key = "godigit"
     card_version = GODIGIT_CARD_VERSION
 
@@ -146,7 +126,6 @@ class GoDigitAdapter:
             return od, tp
 
         file_sha = _sha256(self._path)
-        source_ref = SourceRef(GODIGIT_FILENAME, file_sha, sheet="4W SATP", role="rate_card_source")
 
         if product == "SATP":
             # SATP: TP commission from 4W SATP sheet
@@ -171,7 +150,8 @@ class GoDigitAdapter:
         tp = ComponentDecision(Component.TP, DecisionStatus.AMBIGUOUS, True)
         tp.evidence = [SourceRef(GODIGIT_FILENAME, file_sha, sheet="4W SATP", role="rate_card_source")]
 
-        rto = policy.rto
+        # The 4W RTO sheet is keyed by RTO code; a printed RTO name will not match it.
+        rto = policy.rto_code or policy.rto
         if not rto:
             tp.issues.append("RTO is required for Go Digit 4WTP cluster mapping.")
             return tp
@@ -249,14 +229,26 @@ class GoDigitAdapter:
             )
             return tp
 
-        # Max CD2 meaning is not independently verified — return AMBIGUOUS with raw value
-        tp.status = DecisionStatus.AMBIGUOUS
-        tp.issues.append(
-            f"Go Digit 4W SATP: Max CD2 value {raw_cd2!r} found (row {row_idx}), "
-            "but the meaning of 'Max CD2' as a payable commission percentage has not been "
-            "verified from workbook instructions, formula trail, or an authoritative Vaatun clarification. "
-            "Vaatun must confirm whether Max CD2 represents the payout rate before this value is applied."
-        )
+        # "Max CD2" is the maximum intermediary payout (CD2) for the cell. The
+        # New Business 1+3 sheet in the same workbook states its CD2 values as
+        # payout rates in decimal form, so SATP Max CD2 is read the same way and
+        # applied to the TP premium. This reading is disclosed on the decision.
+        try:
+            rate = (Decimal(str(raw_cd2)) * Decimal(100)).quantize(Decimal("0.01")).normalize()
+        except Exception:
+            tp.issues.append(f"Go Digit 4W SATP: Max CD2 cell E{row_idx} is not numeric ({raw_cd2!r}).")
+            return tp
+        tp.rate_percent = rate
+        tp.rate_basis = "TP premium"
+        tp.status = DecisionStatus.RESOLVED
+        tp.issues.append("Assumption: 'Max CD2' is the payout rate (decimal form, e.g. 0.46 = 46%), "
+                         "consistent with the CD2 rates on the New Business 1+3 sheet.")
+        if policy.tp_premium is not None:
+            tp.premium_basis = policy.tp_premium
+            tp.commission_amount = (policy.tp_premium * rate / Decimal(100)).quantize(Decimal("0.01"))
+            tp.calculation = f"TP premium {policy.tp_premium} × {rate}% = {tp.commission_amount}"
+        else:
+            tp.issues.append("Commission amount not calculated because the TP premium is missing.")
         if note:
             tp.issues.append(f"Source note: {note}")
         return tp
@@ -296,7 +288,8 @@ class GoDigitAdapter:
             tp.status = DecisionStatus.UNSUPPORTED
             tp.issues.append("Go Digit: no separate TP rate is supplied by the New Business 1+3 grid.")
             return od, tp
-        rto = policy.rto
+        # The 4W RTO sheet is keyed by RTO code; a printed RTO name will not match it.
+        rto = policy.rto_code or policy.rto
         if not rto:
             od.issues.append("RTO is required for Go Digit 4W Package cluster mapping.")
             tp.issues.append("Go Digit TP commission not provided in New Business 1+3 grid.")
@@ -364,7 +357,7 @@ class GoDigitAdapter:
             return od, tp
 
         row_idx, rate_raw = matched[0]
-        cell_col_letter = chr(ord("A") + group_col)  # rough cell reference
+        cell_col_letter = chr(ord("A") + group_col)  # Excel column letter for the evidence reference
         cell_ref = SourceRef(
             GODIGIT_FILENAME, file_sha,
             sheet="4W New Business 1+3", cell=f"{cell_col_letter}{row_idx}", role="rate_cell"

@@ -94,15 +94,17 @@ class HDFCAdapter:
                                  role="candidate_OD_rate_table")]
         tp_ref = SourceRef(HDFC_FILENAME, card_hash, page=1, table=1, row=2,
                            role="missing_component_evidence")
-        tp = ComponentDecision(Component.TP, DecisionStatus.UNSUPPORTED, product == "Package",
-                               evidence=[tp_ref],
-                               issues=["The supplied HDFC PDF contains no verified TP commission rate; the cited table only has Package and SAOD columns."])
+        # The HDFC grid is an OD payout grid: its Package and SAOD columns are applied
+        # to the OD premium and it has no TP column, so no TP commission is payable
+        # under this card for Package policies.
+        tp = ComponentDecision(Component.TP, DecisionStatus.NOT_APPLICABLE, False, evidence=[tp_ref],
+                               issues=["HDFC pays this grid on the OD premium only; the card has no TP payout column."])
         if product == "SAOD":
             tp = ComponentDecision(Component.TP, DecisionStatus.NOT_APPLICABLE, False)
         if product == "SATP":
             od = ComponentDecision(Component.OD, DecisionStatus.NOT_APPLICABLE, False)
-            tp.status = DecisionStatus.UNSUPPORTED
-            tp.applicable = True
+            tp = ComponentDecision(Component.TP, DecisionStatus.UNSUPPORTED, True, evidence=[tp_ref],
+                                   issues=["The supplied HDFC grid has no standalone-TP (SATP) payout rate."])
             return od, tp
         zone, zone_evidence, zone_issue = self._resolve_zone(policy, card_hash)
         if zone_issue:

@@ -1,5 +1,5 @@
 import { test, expect, type Page } from '@playwright/test';
-import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { createClient } from '@supabase/supabase-js';
 import { createHash, randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
@@ -20,7 +20,8 @@ test('live Supabase user workflow, refresh persistence, logout and User B isolat
   const fixture=path.join(repoRoot,'sample-policies','pvt-car-satp-go-digit.pdf');const filename=path.basename(fixture);const sha=createHash('sha256').update(readFileSync(fixture)).digest('hex');
   await signIn(page,creds[0].email,creds[0].password);
   await page.getByLabel('Search documents').fill(filename);
-  await page.locator('input[type=file]').setInputFiles(fixture);
+  // Hydration-safe file selection: clear and re-attach until the upload button enables.
+  await expect(async()=>{await page.locator('input[type=file]').setInputFiles([]);await page.locator('input[type=file]').setInputFiles(fixture);await expect(page.getByRole('button',{name:'Upload PDF'})).toBeEnabled({timeout:2_000});}).toPass({timeout:30_000});
   await page.getByRole('button',{name:'Upload PDF'}).click();
   await expect(page.getByRole('status').filter({hasText:'Uploaded'})).toBeVisible({timeout:30_000});
   const doc=await admin.from('documents').select('id,user_id,sha256,storage_path').eq('user_id',createdUsers[0]).eq('sha256',sha).single();

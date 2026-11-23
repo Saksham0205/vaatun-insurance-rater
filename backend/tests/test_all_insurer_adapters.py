@@ -12,7 +12,6 @@ All expected rates are sourced directly from the rate cards as inspected.
 from decimal import Decimal
 from pathlib import Path
 
-import pytest
 
 from app.rating_engine.adapters.hdfc import HDFCAdapter
 from app.rating_engine.adapters.godigit import GoDigitAdapter
@@ -60,7 +59,7 @@ class TestHDFCAdapter:
         assert od.status == DecisionStatus.RESOLVED, od.issues
         assert od.rate_percent == Decimal("17.5"), f"Expected 17.5%, got {od.rate_percent}"
         assert od.commission_amount == Decimal("1400.00"), f"Expected 1400.00, got {od.commission_amount}"
-        assert tp.status == DecisionStatus.UNSUPPORTED
+        assert tp.status == DecisionStatus.NOT_APPLICABLE and tp.applicable is False  # OD-only grid
 
     def test_hdfc_haryana_state_automatically_selects_zone2(self):
         """Haryana is explicitly Zone 2 in page 2 of the HDFC source PDF."""
@@ -233,8 +232,10 @@ class TestGoDigitAdapter:
             rto="AN01", tp_premium=Decimal("3000"),
         )
         od, tp = self.adapter.rate(policy, "SATP")
-        # Andaman, Petrol>1000, All age → Max CD2 = 0.51 → AMBIGUOUS (Max CD2 not verified)
-        assert tp.status == DecisionStatus.AMBIGUOUS
+        # Andaman, Petrol>1000 → Max CD2 read as the payout rate, with the reading disclosed.
+        assert tp.status == DecisionStatus.RESOLVED
+        assert tp.rate_basis == "TP premium"
+        assert tp.commission_amount == (Decimal("3000") * tp.rate_percent / 100).quantize(Decimal("0.01"))
         assert "Max CD2" in " ".join(tp.issues)
 
     def test_godigit_new_business_tata_delhi_resolves(self):
@@ -374,8 +375,8 @@ class TestRelianceAdapter:
         # Commission amount = 5000 × 0% = 0
         assert tp.commission_amount == Decimal("0.00")
 
-    def test_reliance_package_less_than_1000cc_adjustment_is_ambiguous(self):
-        """The source does not establish whether '5% lesser' means a relative or pp reduction."""
+    def test_reliance_package_less_than_1000cc_applies_disclosed_pp_reduction(self):
+        """'5% lesser' is applied as -5 percentage points and disclosed as an assumption."""
         policy = _policy(
             fuel="Petrol",
             od_premium=Decimal("8000"),
@@ -383,8 +384,11 @@ class TestRelianceAdapter:
             engine_cc=800,
         )
         od, tp = self.adapter.rate(policy, "Package")
-        assert od.status == DecisionStatus.AMBIGUOUS
-        assert od.rate_percent is None
+        assert od.status == DecisionStatus.RESOLVED
+        assert od.rate_percent == Decimal("20")  # Mumbai petrol 25% - 5 pp
+        assert od.commission_amount == Decimal("1600.00")
+        assert any(issue.startswith("Assumption:") for issue in od.issues)
+        assert tp.rate_percent == Decimal("0")  # STP payout is not adjusted below zero
 
     def test_reliance_missing_fuel_is_ambiguous(self):
         """Missing fuel → AMBIGUOUS."""
