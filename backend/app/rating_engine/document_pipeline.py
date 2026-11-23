@@ -2,7 +2,6 @@
 from __future__ import annotations
 
 import re
-import os
 from dataclasses import asdict, dataclass, field
 from decimal import Decimal
 from pathlib import Path
@@ -499,12 +498,8 @@ def normalize_policy_input(facts: StructuredPolicyFacts) -> PolicyInput:
         source_evidence=refs)
 
 
-def document_to_decision(path: str | Path, *, rate_card_root: str | Path | None = None,
-                         max_ocr_pages: int | None = None) -> DocumentDecision:
-    if max_ocr_pages is None:
-        configured = os.getenv("VAATUN_MAX_OCR_PAGES", "").strip()
-        max_ocr_pages = int(configured) if configured else None
-    parsed = parse_pdf(path, ocr_fallback=True, max_ocr_pages=max_ocr_pages)
+def document_to_decision(path: str | Path, *, rate_card_root: str | Path | None = None) -> DocumentDecision:
+    parsed = parse_pdf(path)
     facts = extract_structured_facts(parsed)
     ai, metadata = extract_pdf(path, {p["page_number"]: p.get("text", "") for p in parsed["pages"]})
     if ai:
@@ -553,7 +548,7 @@ def document_to_decision(path: str | Path, *, rate_card_root: str | Path | None 
                 )
     if parsed.get("ocr_pages_limited"):
         facts.missing_or_uncertain.append(
-            f"OCR page limit reached ({max_ocr_pages}); unprocessed scanned pages may contain additional facts")
+            "Some scanned pages could not be read as selectable text; Gemini extraction covers the full PDF")
     policy = normalize_policy_input(facts)
     decision = rate_policy(policy, rate_card_root) if rate_card_root else rate_policy(policy)
     return DocumentDecision(parsed["document_name"], parsed["sha256"], parsed["page_count"],

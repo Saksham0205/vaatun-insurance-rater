@@ -1,6 +1,8 @@
 # Vaatun Insurance Rater
 
-Authenticated workspace for uploading motor policy PDFs, reviewing extracted policy facts, and viewing evidence-backed OD and TP commission decisions. The browser application uses Next.js, TypeScript, Tailwind CSS, and Supabase Auth. FastAPI remains responsible for authenticated upload, extraction/OCR, deterministic rating, and persistent Supabase database and private Storage access.
+Authenticated workspace for uploading motor policy PDFs, reviewing extracted policy facts, and viewing evidence-backed OD and TP commission decisions. The browser application uses Next.js, TypeScript, Tailwind CSS, and Supabase Auth. FastAPI remains responsible for authenticated upload, extraction, deterministic rating, and persistent Supabase database and private Storage access.
+
+**PDF extraction uses Gemini as the sole provider.** PyMuPDF handles PDF integrity checks, page counting, hashing, and selectable-text extraction; Gemini processes the full PDF bytes for field extraction. Image-only pages that contain no selectable text are passed to Gemini as raw PDF bytes; there is no local OCR fallback.
 
 The frontend does not use Gemini directly, choose commission rates, or display unsupported rates as confirmed.
 
@@ -8,17 +10,32 @@ The frontend does not use Gemini directly, choose commission rates, or display u
 
 ### Backend
 
+The backend requires **Python 3.11.11** (pinned in `backend/.python-version`).
+
 ```powershell
 cd backend
-python -m venv .venv
+python3.11 -m venv .venv
 .venv\Scripts\Activate.ps1
-python -m pip install --default-timeout=300 --retries 20 -r requirements.txt
+# Production dependencies only:
+python -m pip install -r requirements.txt
+# Add development/test dependencies:
+python -m pip install -r requirements-dev.txt
 Copy-Item .env.example .env
-# Configure the Supabase URL, publishable key, service-role key, bucket and CORS.
+# Configure GEMINI_API_KEY, SUPABASE_URL, SUPABASE_ANON_KEY,
+# SUPABASE_SERVICE_ROLE_KEY, SUPABASE_BUCKET, and CORS_ORIGINS.
 python -m uvicorn app.main:app --reload --port 8000
 ```
 
 Keep `SUPABASE_SERVICE_ROLE_KEY` and all provider secrets only in the backend environment. The backend must use the existing migrated Supabase schema and a private `policy-pdfs` bucket.
+
+#### Dependency files
+
+| File | Purpose |
+|------|---------|
+| `requirements.txt` | Production dependencies (installed by Render) |
+| `requirements-dev.txt` | Development/test tools — pytest, debugpy |
+
+
 
 ### Frontend
 
