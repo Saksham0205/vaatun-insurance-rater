@@ -15,7 +15,8 @@ class Settings(BaseSettings):
     # matches loopback hosts; deployed origins must remain in CORS_ORIGINS.
     cors_origin_regex: str = r"^https?://(localhost|127\.0\.0\.1)(:\d+)?$"
     max_upload_bytes: int = 25 * 1024 * 1024
-    analysis_stale_after_seconds: int = 1800
+    # A `processing` analysis untouched this long is treated as dead and marked failed.
+    analysis_stale_after_seconds: int = 600
     model_config = SettingsConfigDict(env_file=(_env_file, ".env"), extra="ignore")
 
 settings = Settings()

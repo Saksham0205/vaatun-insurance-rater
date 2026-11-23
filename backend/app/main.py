@@ -255,13 +255,12 @@ def get_analysis(
 
 def _document_response(row: dict) -> DocumentResponse:
     latest = row.get("latest_analysis") or {}
-    insurer_fact = ((latest.get("result_json") or {}).get("facts") or {}).get("insurer") or {}
     return DocumentResponse(
         id=str(row["id"]), original_name=row["original_name"], sha256=row["sha256"],
         byte_count=row["byte_count"], status=row["status"], uploaded_at=row["uploaded_at"],
         updated_at=row.get("updated_at"), latest_analysis_id=latest.get("id"),
         assessment_complete=latest.get("assessment_complete"),
-        insurer=insurer_fact.get("value"),
+        insurer=latest.get("insurer"),
     )
 
 

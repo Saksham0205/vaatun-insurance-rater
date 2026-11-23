@@ -13,4 +13,4 @@ test-results/
 inspect*_output.txt
 policy_ocr_*.json
 .vscode/
-frontend\.env.local
+frontend\.env.local.next-check/

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import datetime, timedelta, timezone
+from functools import lru_cache
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,15 @@ class PersistenceError(RuntimeError):
     pass
 
 
+@lru_cache(maxsize=1)
+def _service_client() -> Client:
+    """Shared for the process: reusing its HTTP connections makes each query ~60 ms
+    instead of paying client creation and a TLS handshake on every request."""
+    if not settings.supabase_url or not settings.supabase_service_role_key:
+        raise PersistenceError("Supabase persistence is not configured.")
+    return create_client(settings.supabase_url, settings.supabase_service_role_key)
+
+
 class SupabaseRepository:
     """Service-role persistence boundary; every document query is owner-scoped."""
 
@@ -30,9 +40,7 @@ class SupabaseRepository:
     @property
     def client(self) -> Client:
         if self._client is None:
-            if not settings.supabase_url or not settings.supabase_service_role_key:
-                raise PersistenceError("Supabase persistence is not configured.")
-            self._client = create_client(settings.supabase_url, settings.supabase_service_role_key)
+            self._client = _service_client()
         return self._client
 
     def find_document_by_hash(self, user_id: str, sha256: str) -> dict[str, Any] | None:
@@ -80,30 +88,50 @@ class SupabaseRepository:
         if status:
             req = req.eq("status", status)
         rows = req.execute().data
-        if insurer:
-            filtered = []
-            for row in rows:
-                latest = self.latest_analysis(user_id, row["id"])
-                if latest and (latest.get("result_json") or {}).get("facts", {}).get("insurer", {}).get("value", "").casefold() == insurer.casefold():
-                    row["latest_analysis"] = latest
-                    filtered.append(row)
-            return filtered
+        if any(row["status"] == "processing" for row in rows):
+            self.expire_stale_analyses(user_id)
+            rows = req.execute().data
+        latest = self._latest_analyses(user_id, [row["id"] for row in rows])
         for row in rows:
-            row["latest_analysis"] = self.latest_analysis(user_id, row["id"])
+            row["latest_analysis"] = latest.get(row["id"])
+        if insurer:
+            rows = [row for row in rows
+                    if ((row["latest_analysis"] or {}).get("insurer") or "").casefold() == insurer.casefold()]
         return rows
 
-    def count_documents(self, user_id: str) -> int:
-        response = self.client.table("documents").select("id", count="exact", head=True).eq("user_id", user_id).execute()
-        return int(response.count or 0)
+    def _latest_analyses(self, user_id: str, document_ids: list[str]) -> dict[str, dict[str, Any]]:
+        """Latest analysis per document in one query (not one query per document)."""
+        if not document_ids:
+            return {}
+        rows = self.client.table("analyses") \
+            .select("id,document_id,status,assessment_complete,created_at,insurer:result_json->facts->insurer->>value") \
+            .eq("user_id", user_id).in_("document_id", document_ids).order("created_at", desc=True).execute().data
+        latest: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            latest.setdefault(row["document_id"], row)
+        return latest
 
     def dashboard_stats(self, user_id: str) -> dict[str, int]:
-        counts: dict[str, int] = {}
-        for status in ("uploaded", "processing", "processed", "failed"):
-            response = self.client.table("documents").select("id", count="exact", head=True).eq("user_id", user_id).eq("status", status).execute()
-            counts[status] = int(response.count or 0)
+        counts = {"uploaded": 0, "processing": 0, "processed": 0, "failed": 0}
+        for row in self.client.table("documents").select("status").eq("user_id", user_id).execute().data:
+            counts[row["status"]] = counts.get(row["status"], 0) + 1
         incomplete = self.client.table("analyses").select("id", count="exact", head=True).eq("user_id", user_id).eq("status", "completed").eq("assessment_complete", False).execute()
         return {"total": sum(counts.values()), "processed": counts["processed"],
                 "pending": counts["uploaded"] + counts["processing"], "incomplete": int(incomplete.count or 0)}
+
+    def expire_stale_analyses(self, user_id: str) -> None:
+        """Fail analyses stuck in ``processing`` past the stale window.
+
+        Analysis runs inside the POST request; if that worker dies (reload, crash,
+        deploy) nothing ever finishes the row, and pollers would wait forever.
+        """
+        stale_before = (datetime.now(timezone.utc) - timedelta(seconds=settings.analysis_stale_after_seconds)).isoformat()
+        message = "Analysis did not finish (the server may have restarted); retry is available."
+        expired = self.client.table("analyses").update(
+            {"status": "failed", "error_message": message, "updated_at": _now(), "completed_at": None}) \
+            .eq("user_id", user_id).eq("status", "processing").lt("updated_at", stale_before).execute().data or []
+        for document_id in {row["document_id"] for row in expired}:
+            self._set_document_status(user_id, document_id, "failed", message)
 
     def get_document(self, user_id: str, document_id: str) -> dict[str, Any] | None:
         rows = self.client.table("documents").select("*").eq("user_id", user_id).eq("id", document_id).limit(1).execute().data
@@ -113,6 +141,9 @@ class SupabaseRepository:
         doc = self.get_document(user_id, document_id)
         if not doc:
             return None
+        if doc["status"] == "processing":
+            self.expire_stale_analyses(user_id)
+            doc = self.get_document(user_id, document_id) or doc
         doc["analyses"] = self.client.table("analyses").select("id,status,overall_status,assessment_complete,created_at,completed_at,error_message,result_json") \
             .eq("user_id", user_id).eq("document_id", document_id).order("created_at", desc=True).execute().data
         doc["latest_analysis"] = doc["analyses"][0] if doc["analyses"] else None
@@ -154,15 +185,14 @@ class SupabaseRepository:
         rows = self.client.table("analyses").select("*").eq("user_id", user_id).eq("id", analysis_id).limit(1).execute().data
         if not rows:
             return None
+        if rows[0]["status"] == "processing":
+            self.expire_stale_analyses(user_id)
+            rows = self.client.table("analyses").select("*").eq("user_id", user_id).eq("id", analysis_id).limit(1).execute().data or rows
         row = rows[0]
         row["extracted_facts"] = self.client.table("extracted_facts").select("*").eq("analysis_id", analysis_id).execute().data
         row["component_decisions"] = self.client.table("component_decisions").select("*").eq("analysis_id", analysis_id).execute().data
         row["evidence_references"] = self.client.table("evidence_references").select("*").eq("analysis_id", analysis_id).execute().data
         return row
-
-    def latest_analysis(self, user_id: str, document_id: str) -> dict[str, Any] | None:
-        rows = self.client.table("analyses").select("*").eq("user_id", user_id).eq("document_id", document_id).order("created_at", desc=True).limit(1).execute().data
-        return rows[0] if rows else None
 
     def claim_analysis(self, user_id: str, document: dict[str, Any], *, force: bool = False) -> tuple[dict[str, Any], bool]:
         """Claim the document's analysis for processing. ``force`` re-runs a completed one."""
