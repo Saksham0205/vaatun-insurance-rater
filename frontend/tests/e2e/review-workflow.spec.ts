@@ -26,22 +26,31 @@ async function signIn(page: Page, email: string, password: string) {
 }
 
 const review = (page: Page) => page.locator('#review');
-const field = (page: Page, label: string) => review(page).locator('label').filter({ hasText: label }).first();
+const field = (page: Page, label: string) =>
+  review(page).locator('label').filter({ hasText: label }).first();
 const total = (page: Page) => page.getByTestId('commission-total');
 
-test('review rating inputs, recalculate, reset and re-run on a real HDFC policy', async ({ page }) => {
+test('review rating inputs, recalculate, reset and re-run on a real HDFC policy', async ({
+  page,
+}) => {
   test.setTimeout(300_000);
   const repoRoot = path.resolve(process.cwd(), '..');
   const be = envFile(path.join(repoRoot, 'backend', '.env'));
   const fe = envFile(path.join(process.cwd(), '.env.local'));
   const url = fe.NEXT_PUBLIC_SUPABASE_URL || be.SUPABASE_URL;
-  const admin = createClient(url, be.SUPABASE_SERVICE_ROLE_KEY, { auth: { persistSession: false, autoRefreshToken: false } });
+  const admin = createClient(url, be.SUPABASE_SERVICE_ROLE_KEY, {
+    auth: { persistSession: false, autoRefreshToken: false },
+  });
   const bucket = be.SUPABASE_BUCKET || 'policy-pdfs';
   let userId = '';
   try {
     const email = `vaatun-pw-review-${randomUUID().slice(0, 8)}@example.com`;
     const password = `${randomUUID()}Aa9!`;
-    const { data, error } = await admin.auth.admin.createUser({ email, password, email_confirm: true });
+    const { data, error } = await admin.auth.admin.createUser({
+      email,
+      password,
+      email_confirm: true,
+    });
     expect(error).toBeNull();
     userId = data.user!.id;
 
@@ -54,22 +63,31 @@ test('review rating inputs, recalculate, reset and re-run on a real HDFC policy'
     await expect(sidebar.getByText('Overview')).toBeVisible();
     // Retry the click until React has hydrated the header (dev mode compiles on demand).
     await expect(async () => {
-      if (await sidebar.getAttribute('data-collapsed') !== 'true') {
+      if ((await sidebar.getAttribute('data-collapsed')) !== 'true') {
         await page.getByRole('button', { name: 'Collapse sidebar' }).click({ timeout: 2_000 });
       }
       await expect(sidebar).toHaveAttribute('data-collapsed', 'true', { timeout: 2_000 });
     }).toPass({ timeout: 30_000 });
     await expect(sidebar.getByText('Overview')).toHaveCount(0);
-    await expect(sidebar.getByRole('link', { name: 'Overview' })).toHaveAttribute('title', 'Overview');
-    await expect.poll(async () => (await sidebar.boundingBox())!.width).toBeLessThan(80);  // after the 200ms transition
-    await page.screenshot({ path: 'test-results/sidebar-collapsed.png', mask: [page.getByTestId('account-email')] });
+    await expect(sidebar.getByRole('link', { name: 'Overview' })).toHaveAttribute(
+      'title',
+      'Overview',
+    );
+    await expect.poll(async () => (await sidebar.boundingBox())!.width).toBeLessThan(80); // after the 200ms transition
+    await page.screenshot({
+      path: 'test-results/sidebar-collapsed.png',
+      mask: [page.getByTestId('account-email')],
+    });
     await page.reload();
     await expect(sidebar).toHaveAttribute('data-collapsed', 'true', { timeout: 30_000 });
     await expect(sidebar.getByRole('button', { name: 'Sign out' })).toBeVisible();
     await page.getByRole('button', { name: 'Expand sidebar' }).click();
     await expect(sidebar.getByText('Overview')).toBeVisible();
     await expect.poll(async () => (await sidebar.boundingBox())!.width).toBeGreaterThan(200);
-    await page.screenshot({ path: 'test-results/sidebar-expanded.png', mask: [page.getByTestId('account-email')] });
+    await page.screenshot({
+      path: 'test-results/sidebar-expanded.png',
+      mask: [page.getByTestId('account-email')],
+    });
 
     const fixture = path.join(repoRoot, 'sample-policies', 'pvt-car-comprehensive-hdfc-ergo.pdf');
     // Re-attach until React has hydrated and registered the file (enables the button).
@@ -81,12 +99,16 @@ test('review rating inputs, recalculate, reset and re-run on a real HDFC policy'
       await expect(uploadButton).toBeEnabled({ timeout: 2_000 });
     }).toPass({ timeout: 30_000 });
     await uploadButton.click();
-    await expect(page.getByRole('status').filter({ hasText: 'Uploaded' })).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByRole('status').filter({ hasText: 'Uploaded' })).toBeVisible({
+      timeout: 30_000,
+    });
     await page.getByRole('button', { name: /Analyze/ }).click();
     await expect(page).toHaveURL(/\/documents\/[0-9a-f-]+$/, { timeout: 120_000 });
 
     // Extraction (no AI) and extracted values with evidence.
-    await expect(page.getByText(/Read without AI: local OCR on \d+ scanned page/)).toBeVisible({ timeout: 30_000 });
+    await expect(page.getByText(/Read without AI: local OCR on \d+ scanned page/)).toBeVisible({
+      timeout: 30_000,
+    });
     await expect(page.getByText('Mahindra BOLERO NEO-N10 (R)')).toBeVisible();
     await expect(page.getByText('₹8,053').first()).toBeVisible();
 
@@ -117,7 +139,7 @@ test('review rating inputs, recalculate, reset and re-run on a real HDFC policy'
     await page.getByTestId('recalculate').click();
     await expect(total(page)).toHaveText('₹1,207.95', { timeout: 30_000 });
     await expect(field(page, 'Fuel')).toContainText('Reviewer');
-    await expect(review(page).getByText('1 input(s) supplied by reviewer')).toBeVisible();
+    await expect(review(page).getByText('1 input from the reviewer')).toBeVisible();
     await expect(page.getByText('15%', { exact: true })).toBeVisible();
     await expect(page.getByText('OD premium 8053 × 15% = 1207.95')).toBeVisible();
     await expect(page.getByText('Assessment incomplete')).toHaveCount(0);
@@ -126,8 +148,12 @@ test('review rating inputs, recalculate, reset and re-run on a real HDFC policy'
     await page.reload();
     await expect(total(page)).toHaveText('₹1,207.95', { timeout: 30_000 });
     await expect(field(page, 'Fuel')).toContainText('Reviewer');
-    await page.screenshot({ path: 'test-results/review-recalculated.png', fullPage: true,
-      mask: [page.getByTestId('account-email')], maskColor: '#eef0f6' });
+    await page.screenshot({
+      path: 'test-results/review-recalculated.png',
+      fullPage: true,
+      mask: [page.getByTestId('account-email')],
+      maskColor: '#eef0f6',
+    });
 
     // Reset returns to PDF-only values.
     await review(page).getByRole('button', { name: 'Reset to PDF values' }).click();
@@ -136,9 +162,13 @@ test('review rating inputs, recalculate, reset and re-run on a real HDFC policy'
 
     // Re-run extraction reads the PDF again and keeps the page usable.
     await page.getByRole('button', { name: 'Re-run extraction' }).click();
-    await expect(page.getByRole('heading', { name: 'Review rating inputs' })).toBeVisible({ timeout: 120_000 });
+    await expect(page.getByRole('heading', { name: 'Review rating inputs' })).toBeVisible({
+      timeout: 120_000,
+    });
     await expect(page.getByText('Mahindra BOLERO NEO-N10 (R)')).toBeVisible();
-    await expect(page.getByRole('button', { name: 'Re-run extraction' })).toBeEnabled({ timeout: 120_000 });
+    await expect(page.getByRole('button', { name: 'Re-run extraction' })).toBeEnabled({
+      timeout: 120_000,
+    });
   } finally {
     if (userId) {
       try {
@@ -146,7 +176,9 @@ test('review rating inputs, recalculate, reset and re-run on a real HDFC policy'
         const paths = (docs.data || []).map(x => x.storage_path);
         if (paths.length) await admin.storage.from(bucket).remove(paths);
         await admin.auth.admin.deleteUser(userId);
-      } catch { /* best-effort cleanup */ }
+      } catch {
+        /* best-effort cleanup */
+      }
     }
   }
 });

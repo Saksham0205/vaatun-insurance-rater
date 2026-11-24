@@ -21,6 +21,10 @@ export async function apiFetch(path: string, init: RequestInit = {}) {
 }
 
 export async function apiError(response: Response) {
-  try { const body = await response.json(); return body.detail || body.message || `Request failed (${response.status})`; }
-  catch { return `Request failed (${response.status})`; }
+  try {
+    const body = await response.json();
+    return body.detail || body.message || `Request failed (${response.status})`;
+  } catch {
+    return `Request failed (${response.status})`;
+  }
 }

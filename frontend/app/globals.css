@@ -2,4 +2,147 @@
 @tailwind components;
 @tailwind utilities;
 
-:root{color-scheme:light}*{box-sizing:border-box}html,body{min-height:100%;margin:0}body{background:#f6f7f9;color:#22262e;font-family:Arial,Helvetica,sans-serif;font-size:14px;-webkit-font-smoothing:antialiased}button,input,select{font:inherit}button:focus-visible,a:focus-visible,input:focus-visible,select:focus-visible{outline:3px solid #a6b2ff;outline-offset:2px}::selection{background:#dbe1ff}
+:root {
+  color-scheme: light;
+}
+* {
+  box-sizing: border-box;
+}
+html,
+body {
+  min-height: 100%;
+  margin: 0;
+}
+body {
+  background: #f3f5f4;
+  color: #172026;
+  font-family: var(--font-body), system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  font-variant-numeric: tabular-nums;
+}
+button,
+input,
+select {
+  font: inherit;
+}
+button:focus-visible,
+a:focus-visible,
+input:focus-visible,
+select:focus-visible,
+.dropzone:has(input:focus-visible) {
+  outline: 3px solid rgba(20, 96, 110, 0.35);
+  outline-offset: 2px;
+}
+::selection {
+  background: #cfe6ea;
+}
+
+/* Rate-card lookup vignette on the sign-in pages: one slow loop. */
+@keyframes vg-scan {
+  0%,
+  8% {
+    transform: translateY(0);
+    opacity: 0;
+  }
+  12% {
+    opacity: 1;
+  }
+  34% {
+    transform: translateY(var(--scan-to));
+    opacity: 1;
+  }
+  40%,
+  100% {
+    transform: translateY(var(--scan-to));
+    opacity: 0;
+  }
+}
+@keyframes vg-cell {
+  0%,
+  34% {
+    background: rgba(255, 255, 255, 0.07);
+    color: rgba(255, 255, 255, 0.55);
+    box-shadow: none;
+  }
+  42%,
+  88% {
+    background: #f0a92e;
+    color: #172026;
+    box-shadow: 0 0 0 6px rgba(240, 169, 46, 0.18);
+  }
+  96%,
+  100% {
+    background: rgba(255, 255, 255, 0.07);
+    color: rgba(255, 255, 255, 0.55);
+    box-shadow: none;
+  }
+}
+@keyframes vg-guide {
+  0%,
+  30% {
+    opacity: 0;
+  }
+  38%,
+  88% {
+    opacity: 1;
+  }
+  96%,
+  100% {
+    opacity: 0;
+  }
+}
+@keyframes vg-result {
+  0%,
+  46% {
+    opacity: 0;
+    transform: translateY(6px);
+  }
+  54%,
+  88% {
+    opacity: 1;
+    transform: none;
+  }
+  96%,
+  100% {
+    opacity: 0;
+    transform: none;
+  }
+}
+.vg-scan {
+  animation: vg-scan 7s cubic-bezier(0.45, 0, 0.2, 1) infinite;
+}
+.vg-cell {
+  animation: vg-cell 7s ease-in-out infinite;
+}
+.vg-guide {
+  animation: vg-guide 7s ease-in-out infinite;
+}
+.vg-result {
+  animation: vg-result 7s cubic-bezier(0.2, 0.7, 0.2, 1) infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+  .vg-scan {
+    opacity: 0 !important;
+  }
+  .vg-cell {
+    animation: none !important;
+    background: #f0a92e !important;
+    color: #172026 !important;
+  }
+  .vg-guide,
+  .vg-result {
+    animation: none !important;
+    opacity: 1 !important;
+    transform: none !important;
+  }
+}
