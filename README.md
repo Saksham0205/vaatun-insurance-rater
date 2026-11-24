@@ -5,6 +5,12 @@ Authenticated workspace for uploading motor policy PDFs, reviewing extracted pol
 ## How a policy is rated (no AI)
 
 1. **Read.** PyMuPDF reads the text layer; scanned pages are OCR'd locally with RapidOCR (no API, no quota).
+   OCR output for the four `sample-policies/` PDFs is committed in `backend/ocr_cache/`, keyed by each
+   file's SHA-256 and produced by the same engine and settings. Those files skip OCR, which otherwise peaks
+   at ~430–460 MB against the 512 MB free Render instance; any other PDF is OCR'd live. If you change the OCR
+   settings, delete `backend/ocr_cache/*.json`, re-run the samples, and copy the new files from the temp
+   cache (`vaatun-policy-ocr-cache` in the system temp folder). `tests/test_bundled_ocr_cache.py` fails if a
+   sample page is missing.
 2. **Extract.** Layout-aware rules (`backend/app/rating_engine/insurer_rules.py`) read each value from the
    same row as its label (or directly beneath it) using OCR positions, plus the text parser in
    `document_pipeline.py`. Every value keeps its page and the exact OCR text as evidence. Values that are

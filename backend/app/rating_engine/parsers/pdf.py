@@ -15,6 +15,11 @@ logger = logging.getLogger("vaatun.ocr")
 _OCR_ENGINE: Any = None
 _OCR_UNAVAILABLE = False
 _OCR_CACHE = Path(tempfile.gettempdir()) / "vaatun-policy-ocr-cache"
+# Read-only OCR output committed with the app for the sample policies, produced
+# by this same engine and settings. It keys on the PDF's SHA-256, so it only ever
+# matches those exact files; anything else is OCR'd live. Running OCR peaks at
+# ~430-460 MB, close to the 512 MB instance limit, so known files skip it.
+_BUNDLED_OCR_CACHE = Path(__file__).resolve().parents[3] / "ocr_cache"
 
 
 def _disable_ort_mem_pattern() -> None:
@@ -60,12 +65,14 @@ def _get_ocr_engine():
 
 def _ocr_page(page: Any, digest: str, page_number: int) -> list[dict[str, Any]] | None:
     """OCR one image-only page locally (no API quota). Results are cached per PDF hash."""
-    cache_file = _OCR_CACHE / f"{digest}-{page_number}.json"
-    if cache_file.is_file():
-        try:
-            return json.loads(cache_file.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
-            pass
+    name = f"{digest}-{page_number}.json"
+    cache_file = _OCR_CACHE / name
+    for cached in (_BUNDLED_OCR_CACHE / name, cache_file):
+        if cached.is_file():
+            try:
+                return json.loads(cached.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                pass
     engine = _get_ocr_engine()
     if engine is None:
         return None
