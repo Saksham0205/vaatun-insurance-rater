@@ -17,11 +17,36 @@ _OCR_UNAVAILABLE = False
 _OCR_CACHE = Path(tempfile.gettempdir()) / "vaatun-policy-ocr-cache"
 
 
+def _disable_ort_mem_pattern() -> None:
+    """Turn off onnxruntime's memory-pattern planning for RapidOCR sessions.
+
+    The plan caches buffers per input shape; every new page size added to the
+    peak (+355 MB per page vs +255 MB without it) with identical OCR output.
+    RapidOCR 1.4.x exposes no option for this, so wrap its session-options hook.
+    """
+    try:
+        from rapidocr_onnxruntime.utils import infer_engine
+    except Exception:  # pragma: no cover - depends on install
+        return
+    original = infer_engine.OrtInferSession._init_sess_opts
+    if getattr(original, "_vaatun_patched", False):
+        return
+
+    def init_sess_opts(config):
+        options = original(config)
+        options.enable_mem_pattern = False
+        return options
+
+    init_sess_opts._vaatun_patched = True
+    infer_engine.OrtInferSession._init_sess_opts = staticmethod(init_sess_opts)
+
+
 def _get_ocr_engine():
     """Lazily load RapidOCR; return None when it is not installed."""
     global _OCR_ENGINE, _OCR_UNAVAILABLE
     if _OCR_ENGINE is None and not _OCR_UNAVAILABLE:
         try:
+            _disable_ort_mem_pattern()
             from rapidocr_onnxruntime import RapidOCR
             # Each onnxruntime thread keeps its own scratch buffers; small instances
             # have 1-2 vCPUs, so more threads only add memory.
@@ -99,7 +124,8 @@ def _parse_pdf(file: Path, page_numbers: set[int] | None, ocr: bool,
             if page_numbers is not None and page_number not in page_numbers:
                 continue
             page_text = page.get_text("text")
-            image_only = not page_text.strip() and bool(page.get_images())
+            has_text_layer = bool(page_text.strip())
+            image_only = not has_text_layer and bool(page.get_images())
             ocr_lines: list[dict[str, Any]] = []
             ocr_used = False
             if image_only and ocr and ocr_count < max_ocr_pages:
@@ -111,7 +137,10 @@ def _parse_pdf(file: Path, page_numbers: set[int] | None, ocr: bool,
                     ocr_used = True
                     image_only = False
             tables = []
-            for table_number, table in enumerate(page.find_tables().tables, 1):
+            # A page without a text layer has no table cells to extract, and
+            # find_tables() on a scanned page still costs ~130 MB transiently.
+            found = page.find_tables().tables if has_text_layer else []
+            for table_number, table in enumerate(found, 1):
                 tables.append({
                     "table_number": table_number,
                     "row_count": table.row_count,
