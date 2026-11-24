@@ -387,7 +387,7 @@ class RelianceAdapter:
         """Find the actual Excel row number for the matching grid entry (1-indexed)."""
         if zone is None or region is None:
             return None
-        wb = openpyxl.load_workbook(self._path, data_only=True)
+        wb = openpyxl.load_workbook(self._path, data_only=True, read_only=True)
         try:
             ws = wb[_SHEET_PC]
             region_lower = region.lower()

@@ -7,6 +7,12 @@ services:
     startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /api/v1/health
     envVars:
+      # glibc otherwise gives each threadpool thread its own heap arena, which
+      # fragments and keeps RSS high after OCR/rate-card work.
+      - key: MALLOC_ARENA_MAX
+        value: "2"
+      - key: LOCAL_OCR_THREADS
+        value: "2"
       - key: SUPABASE_URL
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY

@@ -372,7 +372,7 @@ class TataAIGAdapter:
                 "Supported territories: " + ", ".join(sorted(_TERRITORY_COLS.keys()))
             ]
 
-        wb = openpyxl.load_workbook(self._path, data_only=True)
+        wb = openpyxl.load_workbook(self._path, data_only=True, read_only=True)
         try:
             ws = wb[_SHEET_PVTCAR]
             # Data starts at row 6 (1-indexed), header is row 5

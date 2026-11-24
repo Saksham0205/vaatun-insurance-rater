@@ -178,7 +178,7 @@ class GoDigitAdapter:
         segment = self._satp_segment(fuel_group, engine_cc)
 
         # Look up in 4W SATP sheet
-        wb = openpyxl.load_workbook(self._path, data_only=True)
+        wb = openpyxl.load_workbook(self._path, data_only=True, read_only=True)
         try:
             ws = wb["4W SATP"]
             matched_rows: list[tuple[int, Any, Any]] = []
@@ -321,7 +321,7 @@ class GoDigitAdapter:
             return od, tp
 
         # Look up cluster row in 4W New Business 1+3
-        wb = openpyxl.load_workbook(self._path, data_only=True)
+        wb = openpyxl.load_workbook(self._path, data_only=True, read_only=True)
         try:
             ws = wb["4W New Business 1+3"]
             matched: list[tuple[int, Any]] = []
@@ -430,7 +430,7 @@ class GoDigitAdapter:
             "4WSAOD": _RTO_COL_SAOD,
         }.get(product_col_name, _RTO_COL_PKG)
 
-        wb = openpyxl.load_workbook(self._path, data_only=True)
+        wb = openpyxl.load_workbook(self._path, data_only=True, read_only=True)
         try:
             ws = wb["4W  RTO"]
             rto_key = rto.upper().replace(" ", "").replace("-", "")

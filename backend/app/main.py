@@ -4,6 +4,7 @@ import hashlib
 import json
 import logging
 import tempfile
+import threading
 import time
 from pathlib import Path
 from typing import Annotated, Any
@@ -40,6 +41,15 @@ _handler = logging.StreamHandler()
 _handler.setFormatter(JsonLogFormatter())
 logging.basicConfig(level=logging.INFO, handlers=[_handler], force=True)
 logger = logging.getLogger("vaatun.api")
+
+# OCR + rate-card lookups peak at a few hundred MB; running them one at a time keeps
+# concurrent uploads from stacking those peaks past the instance memory limit.
+_ANALYSIS_LOCK = threading.Lock()
+
+
+def _run_exclusive(fn, *args, **kwargs):
+    with _ANALYSIS_LOCK:
+        return fn(*args, **kwargs)
 
 app = FastAPI(title="Vaatun Insurance Rater API", version="1.0.0")
 app.add_middleware(
@@ -174,7 +184,7 @@ async def analyze_document(
             local_pdf = Path(temp_dir) / "policy.pdf"
             local_pdf.write_bytes(content)
             pipeline_result = await run_in_threadpool(
-                document_to_decision, local_pdf, rate_card_root=Path(__file__).resolve().parents[1] / "rate_cards")
+                _run_exclusive, document_to_decision, local_pdf, rate_card_root=Path(__file__).resolve().parents[1] / "rate_cards")
             if pipeline_result.document_sha256 != document["sha256"]:
                 raise RuntimeError("Stored document hash does not match uploaded source.")
         result = result_dict(pipeline_result)
@@ -229,7 +239,7 @@ async def review_analysis(
         raise HTTPException(status_code=404, detail="Document not found.")
     try:
         result = await run_in_threadpool(
-            rating_review.rerate, row["result_json"], body.overrides,
+            _run_exclusive, rating_review.rerate, row["result_json"], body.overrides,
             Path(__file__).resolve().parents[1] / "rate_cards")
     except LookupError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

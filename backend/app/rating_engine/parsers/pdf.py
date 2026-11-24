@@ -23,7 +23,10 @@ def _get_ocr_engine():
     if _OCR_ENGINE is None and not _OCR_UNAVAILABLE:
         try:
             from rapidocr_onnxruntime import RapidOCR
-            _OCR_ENGINE = RapidOCR()
+            # Each onnxruntime thread keeps its own scratch buffers; small instances
+            # have 1-2 vCPUs, so more threads only add memory.
+            threads = int(os.getenv("LOCAL_OCR_THREADS", "2"))
+            _OCR_ENGINE = RapidOCR(intra_op_num_threads=threads, inter_op_num_threads=1)
         except Exception as exc:  # pragma: no cover - depends on install
             logger.warning("Local OCR unavailable (%s); scanned pages cannot be read", exc)
             _OCR_UNAVAILABLE = True
@@ -46,6 +49,8 @@ def _ocr_page(page: Any, digest: str, page_number: int) -> list[dict[str, Any]] 
     pix = page.get_pixmap(matrix=pymupdf.Matrix(2, 2), alpha=False)
     image = np.frombuffer(pix.samples, dtype=np.uint8).reshape(pix.height, pix.width, pix.n)
     result, _ = engine(image)
+    del image, pix
+    pymupdf.TOOLS.store_shrink(100)
     lines: list[dict[str, Any]] = []
     for box, text, confidence in result or []:
         lines.append({"text": text, "confidence": float(confidence),
@@ -74,7 +79,17 @@ def parse_pdf(path: str | Path,
         ocr = os.getenv("LOCAL_OCR_ENABLED", "true").casefold() != "false"
     if max_ocr_pages is None:
         max_ocr_pages = int(os.getenv("LOCAL_OCR_MAX_PAGES", "8"))
-    file = Path(path)
+    try:
+        return _parse_pdf(Path(path), page_numbers, ocr, max_ocr_pages)
+    finally:
+        # MuPDF keeps decoded fonts/images/display lists in a global store that is
+        # never handed back on its own; it grew RSS by ~50-100 MB per policy and
+        # pushed the service past its memory limit.
+        pymupdf.TOOLS.store_shrink(100)
+
+
+def _parse_pdf(file: Path, page_numbers: set[int] | None, ocr: bool,
+               max_ocr_pages: int) -> dict[str, Any]:
     digest = hashlib.sha256(file.read_bytes()).hexdigest()
     pages: list[dict[str, Any]] = []
     ocr_count = 0
