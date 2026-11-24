@@ -187,7 +187,7 @@ def _page_match(parsed, patterns, converter=lambda m: m.group(1), page_filter=No
     return None
 
 
-def _search(lines, pattern, converter=lambda m: m.group(1), confidence_floor=CONFIDENCE_FLOOR):
+def _search(lines, pattern, converter=lambda m: m.group(1)):
     regex = re.compile(pattern, re.I)
     for page, text, conf in lines:
         match = regex.search(text)

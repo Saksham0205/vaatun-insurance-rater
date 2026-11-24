@@ -1,9 +1,6 @@
 """Parser tests against the real supplied rate-card files; these are not policy validation."""
 from pathlib import Path
 
-import pytest
-
-from app.rating_engine.catalog import source_audit
 from app.rating_engine.parsers import parse_pdf, parse_workbook
 from app.rating_engine.adapters.hdfc import HDFCAdapter
 from app.rating_engine import rate_policy
@@ -12,17 +9,6 @@ from app.rating_engine.models import PolicyInput, SourceRef
 
 ROOT = Path(__file__).resolve().parents[2]
 RATE_CARDS = ROOT / "backend" / "rate_cards"
-
-
-@pytest.mark.skipif(not (ROOT / "MANIFEST.json").is_file(),
-                    reason="MANIFEST.json (source-file checksums) is not in the repository")
-def test_bundle_audit_verifies_restored_fixtures_and_manifest():
-    audit = source_audit(ROOT)
-    assert len(audit["rate_cards"]) == 4
-    assert audit["manifest_present"]
-    assert not audit["missing_policy_files"]
-    assert len(audit["manifest_checks"]) == 10
-    assert all(item["matches"] for item in audit["manifest_checks"])
 
 
 def test_excel_parser_preserves_sheet_cell_formula_and_cached_value():

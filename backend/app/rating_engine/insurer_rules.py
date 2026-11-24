@@ -145,13 +145,6 @@ def p_registration(text: str) -> str | None:
     return "".join(match.groups())
 
 
-def p_text(text: str) -> str | None:
-    cleaned = text.strip(" :/-")
-    if len(cleaned) < 2 or re.fullmatch(r"[\d\s.,:/-]+", cleaned):
-        return None
-    return cleaned
-
-
 def p_percent(text: str) -> Decimal | None:
     match = re.search(r"([0-9]{1,2}(?:\.[0-9]+)?)\s*%", text)
     return Decimal(match.group(1)) if match else None

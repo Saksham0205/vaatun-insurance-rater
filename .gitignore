@@ -3,6 +3,7 @@
 .venv/
 __pycache__/
 .pytest_cache/
+.ruff_cache/
 .next/
 node_modules/
 *.pyc
@@ -10,7 +11,4 @@ node_modules/
 *.tsbuildinfo
 playwright-report/
 test-results/
-inspect*_output.txt
-policy_ocr_*.json
 .vscode/
-frontend\.env.local.next-check/

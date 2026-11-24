@@ -87,7 +87,7 @@ class HDFCAdapter:
                     ))
         return rules
 
-    def rate(self, policy: PolicyInput, product: str, source_sha: str | None = None) -> tuple[ComponentDecision, ComponentDecision]:
+    def rate(self, policy: PolicyInput, product: str) -> tuple[ComponentDecision, ComponentDecision]:
         od = ComponentDecision(Component.OD, DecisionStatus.AMBIGUOUS, True)
         card_hash = (hashlib.sha256(self.path.read_bytes()).hexdigest() if self.path.exists() else None)
         od.evidence = [SourceRef(HDFC_FILENAME, card_hash, page=1, table=1,

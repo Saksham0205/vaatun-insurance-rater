@@ -2,9 +2,6 @@ from datetime import datetime
 from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
-DecisionStatus = Literal["resolved", "not_applicable", "unsupported", "ambiguous"]
-
-
 class DocumentResponse(BaseModel):
     model_config = ConfigDict(extra="ignore")
     id: str
@@ -21,32 +18,6 @@ class DocumentResponse(BaseModel):
 
 class DocumentDetailResponse(DocumentResponse):
     analyses: list[dict[str, Any]] = Field(default_factory=list)
-
-
-class DecisionComponentResponse(BaseModel):
-    component: Literal["OD", "TP"]
-    status: DecisionStatus
-    applicable: bool
-    rate_percent: str | None = None
-    commission_amount: str | None = None
-    rate_basis: str | None = None
-    premium_basis: str | None = None
-    selected_conditions: dict[str, Any] = Field(default_factory=dict)
-    evidence: list[dict[str, Any]] = Field(default_factory=list)
-    issues: list[str] = Field(default_factory=list)
-
-
-class AnalysisResponse(BaseModel):
-    model_config = ConfigDict(extra="allow")
-    id: str
-    document_id: str
-    status: Literal["pending", "processing", "completed", "failed"]
-    overall_status: Literal["resolved", "unsupported", "ambiguous"] | None = None
-    assessment_complete: bool
-    created_at: datetime | str | None = None
-    completed_at: datetime | str | None = None
-    error_message: str | None = None
-    result: dict[str, Any] | None = None
 
 
 class AnalysisStartResponse(BaseModel):

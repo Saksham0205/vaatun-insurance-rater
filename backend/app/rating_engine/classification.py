@@ -33,15 +33,3 @@ def classify_business(current_insurer: str | None, previous_insurer: str | None,
     if stated_business_type:
         return stated_business_type, []
     return None, ["Business type cannot be derived without current and previous insurer or an explicit value."]
-
-
-def classify_vehicle(policy: PolicyInput, require_engine_cc: bool = False) -> tuple[str | None, list[str]]:
-    if policy.fuel is None:
-        return None, ["Fuel information is missing."]
-    fuel = policy.fuel.casefold().strip()
-    known = {"petrol", "diesel", "cng", "lpg", "electric", "ev", "hybrid", "bifuel"}
-    if fuel not in known:
-        return None, [f"Fuel '{policy.fuel}' is not in the verified passenger-car fuel vocabulary."]
-    if require_engine_cc and policy.engine_cc is None:
-        return None, ["Engine capacity is missing for this insurer's vehicle segment lookup."]
-    return fuel, []

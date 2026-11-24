@@ -5,7 +5,7 @@ from app.rating_engine.exceptions import exception_decision
 from app.rating_engine.models import (Component, DecisionStatus,
                                       NormalizedRateRule, PolicyInput, SourceRef, SourceValue)
 from app.rating_engine.premium import hdfc_band_from_premium
-from app.rating_engine.classification import classify_business, classify_policy, classify_vehicle
+from app.rating_engine.classification import classify_business, classify_policy
 
 
 def synthetic_rule(rate, *, conditions=None, declined=False):
@@ -42,16 +42,6 @@ def test_hdfc_premium_boundaries_are_not_assigned_implicitly():
         band, issue = hdfc_band_from_premium(Decimal(amount))
         assert band is None and "exact OD premium boundary" in issue
     assert hdfc_band_from_premium(Decimal("9999"))[0] == "<10k"
-
-
-def test_missing_fuel_information_is_ambiguous_for_vehicle_classification():
-    segment, issues = classify_vehicle(PolicyInput())
-    assert segment is None and "Fuel information is missing" in issues[0]
-
-
-def test_missing_engine_capacity_when_required():
-    segment, issues = classify_vehicle(PolicyInput(fuel="Petrol"), require_engine_cc=True)
-    assert segment is None and "Engine capacity is missing" in issues[0]
 
 
 def test_unsupported_policy_type_is_not_guessed():

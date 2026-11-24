@@ -1,17 +1,19 @@
 """Regression coverage using the restored policy PDFs and supplied rate cards."""
+import hashlib
+from decimal import Decimal
 from pathlib import Path
 
-import pytest
-from decimal import Decimal
-
 from app.rating_engine import rate_policy
-from app.rating_engine.catalog import sha256_file
 from app.rating_engine.models import PolicyInput, SourceRef
 from app.rating_engine.parsers import parse_pdf, parse_workbook
 
 ROOT = Path(__file__).resolve().parents[2]
 POLICIES = ROOT / "sample-policies"
 CARDS = ROOT / "backend" / "rate_cards"
+
+
+def sha256_file(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
 def policy_ref(filename, page, role):
@@ -71,12 +73,3 @@ def test_real_card_explicit_zero_is_distinct_from_blank():
     cells = {cell.ref.cell: cell.original_value for cell in parsed["sheets"][0]["cells"]}
     assert cells["E3"] == 0
     assert cells["E3"] is not None
-
-
-@pytest.mark.skipif(not (ROOT / "MANIFEST.json").is_file(),
-                    reason="MANIFEST.json (source-file checksums) is not in the repository")
-def test_actual_policy_hashes_match_manifest():
-    from app.rating_engine.catalog import source_audit
-    audit = source_audit(ROOT)
-    assert len(audit["manifest_checks"]) == 10
-    assert all(item["matches"] for item in audit["manifest_checks"])

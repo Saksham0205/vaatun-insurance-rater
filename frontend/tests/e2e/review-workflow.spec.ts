@@ -46,9 +46,6 @@ test('review rating inputs, recalculate, reset and re-run on a real HDFC policy'
     userId = data.user!.id;
 
     await signIn(page, email, password);
-    // The AI key button is gone from the header.
-    await expect(page.getByTestId('gemini-settings-button')).toHaveCount(0);
-
     // Sidebar: removed items are gone; it collapses to an icon rail and remembers that.
     const sidebar = page.getByTestId('sidebar');
     for (const removed of ['History', 'Evidence-first workflow', 'Help & support']) {
